@@ -29,6 +29,16 @@ To use `ehrapy.tools.leiden`, install the `leiden` extra (which pulls in `igraph
 pip install ehrapy[leiden]
 ```
 
+#### MCP server
+
+To expose ehrapy to MCP clients (Cursor, Claude, etc.), install the `mcp` extra:
+
+```console
+pip install ehrapy[mcp]
+```
+
+Then start the server with `ehrapy-mcp` or `python -m ehrapy.mcp`.
+
 ## From sources
 
 The sources for ehrapy can be downloaded from the [Github repo].

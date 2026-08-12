@@ -76,6 +76,7 @@ dask = [
     "dask-ml>=2025.1.0",
 ]
 leiden = ["igraph"]  # careful - GPL
+mcp = ["fastmcp>=2.0"]
 rapids12 = ["rapids-singlecell[rapids12]"]
 rapids13 = ["rapids-singlecell[rapids13]"]
 dev = [
@@ -104,16 +105,19 @@ doc = [
     "nbsphinx-link",
     "ipykernel",
     "ipython",
-    "ehrapy[dask,leiden]",
+    "ehrapy[dask,leiden,mcp]",
     "scverse-misc"
 ]
 test = [
-    "ehrapy[dask,leiden]",
+    "ehrapy[dask,leiden,mcp]",
     "pytest",
     "pytest-cov",
     "pytest-mock"
 ]
 
+
+[project.scripts]
+ehrapy-mcp = "ehrapy.mcp.server:main"
 
 [tool.hatch.version]
 source = "vcs"
@@ -139,7 +143,7 @@ scripts.clean = "git clean -fdX -- {args:docs}"
 
 # CPU
 [tool.hatch.envs.hatch-test]
-features = [ "dask", "leiden" ]
+features = [ "dask", "leiden", "mcp" ]
 post-install-commands = [
   "uv pip install --reinstall --no-deps -e submodules/ehrdata",
 ]
