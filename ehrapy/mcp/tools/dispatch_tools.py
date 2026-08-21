@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from fastmcp import Context
 
 from ehrapy.mcp.catalog import catalog_summary, list_functions, list_namespaces
 from ehrapy.mcp.dispatch import dispatch_json, help_json
 from ehrapy.mcp.edata_store import fork_edata, load_edata
 from ehrapy.mcp.errors import mcp_error, unknown_handle_error
 from ehrapy.mcp.session import get_session
-
-if TYPE_CHECKING:
-    from fastmcp import Context
 
 
 async def list_ehrapy_functions(
