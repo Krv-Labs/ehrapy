@@ -80,6 +80,7 @@ mcp = [
     "fastmcp>=3.4,<4",
     "numpydoc",
     "platformdirs",
+    "igraph",  # careful - GPL; needed because the MCP workflow guide steers agents to leiden
 ]
 rapids12 = ["rapids-singlecell[rapids12]"]
 rapids13 = ["rapids-singlecell[rapids13]"]

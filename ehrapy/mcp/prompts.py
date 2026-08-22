@@ -27,7 +27,7 @@ WORKFLOW_PROMPT = """# ehrapy MCP Server — Agent Guide
 4. `run_plot(function='missing_values_matrix')` → Visualize missingness patterns
 
 ### 2. Dimension Reduction & Subtyping
-1. `run_preprocessing(function='encode')` → Encode categorical features
+1. `run_preprocessing(function='encode', params={'autodetect': True})` → Encode categorical features (`autodetect` is required; a bare `encode` call errors)
 2. `run_preprocessing(function='knn_impute')` → Impute missing numerical values
 3. `run_preprocessing(function='pca')` → Principal component analysis
 4. `run_preprocessing(function='neighbors')` → Compute neighborhood graph

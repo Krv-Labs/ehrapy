@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import ehrdata.io as ed_io
+from fastmcp import Context  # noqa: TC002
 from fastmcp.tools.tool import ToolResult
 
 from ehrapy.mcp.edata_store import load_edata, save_edata
@@ -20,6 +21,7 @@ def ingest_dataset(
     dataset_name: str | None = None,
     sep: str = ",",
     index_col: str | None = None,
+    ctx: Context = None,
 ) -> ToolResult:
     """Read an external tabular data file (CSV, TSV) and convert it into a managed EHRData handle.
 
@@ -43,7 +45,7 @@ def ingest_dataset(
         name = dataset_name or resolved_path.stem
         record = save_edata(edata, name=name, source_path=str(resolved_path))
 
-        session = get_session()
+        session = get_session(ctx)
         session.set_latest_edata_id(record.edata_id)
 
         suggestions = get_suggested_next("io", "read_csv")
@@ -79,12 +81,13 @@ def export_edata(
     target_path: str,
     edata_id: str | None = None,
     fmt: Literal["h5ad", "zarr", "csv"] = "h5ad",
+    ctx: Context = None,
 ) -> ToolResult:
     """Export an EHRData object to a specified file path.
 
     Supports writing to h5ad, zarr, or CSV formats.
     """
-    session = get_session()
+    session = get_session(ctx)
     used_latest = False
     handle = edata_id
     if handle is None:

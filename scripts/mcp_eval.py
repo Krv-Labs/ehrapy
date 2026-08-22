@@ -80,6 +80,25 @@ async def run_eval() -> int:
                         failed_steps += 1
                         break
 
+                    expected_code = step.get("assert_error_code")
+                    if expected_code and struct.get("error_code") != expected_code:
+                        print(
+                            f"  ❌ Step {i} ({tool_name}): expected error_code "
+                            f"'{expected_code}', got '{struct.get('error_code')}'"
+                        )
+                        task_passed = False
+                        failed_steps += 1
+                        break
+
+                    # A plot step must actually return an image, not just report success.
+                    if step.get("assert_image"):
+                        kinds = [type(c).__name__ for c in (res.content or [])]
+                        if "ImageContent" not in kinds:
+                            print(f"  ❌ Step {i} ({tool_name}): expected an image, got {kinds}")
+                            task_passed = False
+                            failed_steps += 1
+                            break
+
                     passed_steps += 1
                     approx_tokens = int(len(content_text) / 4)
                     print(f"  ✔ Step {i}: {tool_name} ({elapsed * 1000:.1f}ms, ~{approx_tokens} tokens)")

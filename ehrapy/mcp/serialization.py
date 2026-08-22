@@ -43,8 +43,18 @@ def _get_max_result_chars() -> int:
 
 
 def _format_cell(val: Any) -> str:
-    if val is None or (isinstance(val, float) and math.isnan(val)) or pd.isna(val):
+    if val is None:
         return "NaN"
+    if isinstance(val, (list, tuple, set, dict, np.ndarray)):
+        # pd.isna on a sequence returns an array, whose truth value is ambiguous.
+        return str(val)[:40]
+    if isinstance(val, float) and math.isnan(val):
+        return "NaN"
+    try:
+        if pd.isna(val):
+            return "NaN"
+    except (TypeError, ValueError):
+        pass
     if isinstance(val, (float, np.floating)):
         return f"{val:.4g}"
     s = str(val).replace("\n", " ").replace("|", "\\|")
@@ -312,9 +322,15 @@ def _serialize_dataframe(
             md = f"### DataFrame ({df.shape[0]} rows × {df.shape[1]} columns — sampled view)\n\n" + table_md
             return meta_tier3, md
 
-        # Tier 1: Pass-through if fits in Tier 1 budget
-        full_table_md = _df_to_markdown_table(df)
-        if len(full_table_md) <= _TIER1_MAX_CHARS:
+        # Tier 1: Pass-through if it fits the Tier 1 budget. Bound the work first --
+        # rendering a 100k-row frame to Markdown just to discover it is too big is the
+        # exact overflow this tier is meant to prevent.
+        cells = df.shape[0] * max(1, df.shape[1])
+        if cells <= _TIER1_MAX_CHARS:
+            full_table_md = _df_to_markdown_table(df)
+        else:
+            full_table_md = None
+        if full_table_md is not None and len(full_table_md) <= _TIER1_MAX_CHARS:
             meta_tier1: dict[str, Any] = {"type": "dataframe", "shape": list(df.shape), "tier": 1}
             md = f"### DataFrame ({df.shape[0]} rows × {df.shape[1]} columns)\n\n" + full_table_md
             return meta_tier1, md
@@ -340,28 +356,52 @@ def _unique_plot_path(plots_dir: Path, stem: str) -> Path:
     return path
 
 
+_MAX_PLOT_BYTES = 800 * 1024
+_DPI_LADDER = (100, 72, 56, 40)
+
+
 def _save_figure(fig: Any, plots_dir: Path, stem: str) -> tuple[dict[str, Any], Path]:
+    """Save a figure, stepping the DPI down until it fits the image budget."""
     path = _unique_plot_path(plots_dir, stem)
-    fig.savefig(path, bbox_inches="tight", dpi=100)
-    # Size guard: if > 800KB, re-render at dpi 72
-    if path.stat().st_size > 800 * 1024:
-        fig.savefig(path, bbox_inches="tight", dpi=72)
-    meta = {"type": "figure", "plot_path": str(path), "media_type": "image/png"}
+    size = 0
+    dpi = _DPI_LADDER[0]
+    for dpi in _DPI_LADDER:
+        fig.savefig(path, bbox_inches="tight", dpi=dpi)
+        size = path.stat().st_size
+        if size <= _MAX_PLOT_BYTES:
+            break
+    meta: dict[str, Any] = {
+        "type": "figure",
+        "plot_path": str(path),
+        "media_type": "image/png",
+        "dpi": dpi,
+        "size_bytes": size,
+    }
+    if size > _MAX_PLOT_BYTES:
+        # Report rather than silently returning an oversized payload.
+        meta["oversized"] = True
     return meta, path
 
 
 def _try_save_holoviews(obj: Any, plots_dir: Path) -> tuple[dict[str, Any], Path] | None:
+    """Render a holoviews object (e.g. ep.pl.kaplan_meier's Overlay) to PNG.
+
+    The matplotlib backend must be loaded and named explicitly: holoviews defaults to
+    bokeh, whose PNG export needs a headless browser and fails on a plain server install.
+    """
     try:
         import holoviews as hv
-
-        if isinstance(obj, hv.core.dimension.Dimensioned):
-            path = _unique_plot_path(plots_dir, "holoviews")
-            hv.save(obj, str(path), fmt="png")
-            meta = {"type": "figure", "plot_path": str(path), "media_type": "image/png"}
-            return meta, path
-    except Exception:  # noqa: BLE001
+    except ImportError:
         return None
-    return None
+
+    if not isinstance(obj, hv.core.dimension.Dimensioned):
+        return None
+
+    hv.extension("matplotlib")
+    path = _unique_plot_path(plots_dir, "holoviews")
+    hv.save(obj, str(path), fmt="png", backend="matplotlib")
+    meta = {"type": "figure", "plot_path": str(path), "media_type": "image/png"}
+    return meta, path
 
 
 def _try_save_visual(obj: Any, plots_dir: Path | None) -> tuple[dict[str, Any], Path] | None:
@@ -375,7 +415,43 @@ def _try_save_visual(obj: Any, plots_dir: Path | None) -> tuple[dict[str, Any], 
     return _try_save_holoviews(obj, plots_dir)
 
 
-def serialize_result(
+_JSON_SAFE_SCALARS = (str, bool, int, float)
+_MAX_INLINE_SEQUENCE = 32
+
+
+def _json_safe(value: Any, _depth: int = 0) -> Any:
+    """Coerce a value into something FastMCP can place in ``structured_content``.
+
+    structured_content is JSON-serialized by the MCP layer, so any ndarray, Series, or
+    exotic object that reaches it aborts the whole tool call. Analysis results such as
+    ``CausalEstimate`` carry ndarrays inside nested ``params`` dicts, so this recurses.
+    """
+    if value is None or isinstance(value, _JSON_SAFE_SCALARS):
+        return None if isinstance(value, float) and not math.isfinite(value) else value
+    if _depth >= 4:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return _json_safe(value.item(), _depth + 1)
+    if isinstance(value, np.ndarray):
+        if value.ndim == 1 and value.size <= _MAX_INLINE_SEQUENCE:
+            return [_json_safe(v, _depth + 1) for v in value.tolist()]
+        return {"type": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, pd.Series):
+        return {"type": "series", "length": int(len(value)), "dtype": str(value.dtype)}
+    if isinstance(value, pd.DataFrame):
+        return {"type": "dataframe", "shape": list(value.shape)}
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        seq = list(value)
+        out = [_json_safe(v, _depth + 1) for v in seq[:_MAX_INLINE_SEQUENCE]]
+        if len(seq) > _MAX_INLINE_SEQUENCE:
+            out.append(f"... ({len(seq) - _MAX_INLINE_SEQUENCE} more)")
+        return out
+    return str(value)[:200]
+
+
+def _serialize_result_inner(
     result: Any,
     *,
     plots_dir: Path | None = None,
@@ -523,3 +599,24 @@ def serialize_result(
     meta = {"type": type(result).__name__}
     md = f"```\n{repr_str}\n```"
     return meta, md
+
+
+def serialize_result(
+    result: Any,
+    *,
+    plots_dir: Path | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
+    params: dict[str, Any] | None = None,
+    function: str = "",
+    edata: EHRData | None = None,
+) -> tuple[dict[str, Any], list[Any] | str]:
+    """Serialize an ehrapy return value, guaranteeing a JSON-safe metadata channel."""
+    meta, content = _serialize_result_inner(
+        result,
+        plots_dir=plots_dir,
+        response_format=response_format,
+        params=params,
+        function=function,
+        edata=edata,
+    )
+    return _json_safe(meta), content

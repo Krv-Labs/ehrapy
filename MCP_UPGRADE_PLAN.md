@@ -340,18 +340,64 @@ port commit applying each origin fix to the new architecture. This checklist was
 
 ### Own bugs found while dogfooding (not origin regressions)
 
-- **Session state leaked across clients.** Every tool called `get_session()` with no `ctx`,
-  so per-client isolation in `session.py` was dead code and client B saw client A's active
-  `edata_id`. Fixed by threading `ctx` through *and* making the session thread-safe —
-  fixing only the former converts a latent bug into a live race.
+All were found by driving the real server against MIMIC-II, not by reading code. Each now
+has a regression test in `tests/mcp/test_merge_ports.py` and/or an eval step.
 
-### Deferred (recorded, not blocking)
+1. **Session state leaked across clients.** Every tool called `get_session()` with no `ctx`,
+   so the per-client isolation in `session.py` was dead code and client B saw client A's
+   active `edata_id`. Fixed by threading `ctx` through *and* making the session thread-safe —
+   fixing only the former converts a latent bug into a live race.
+2. **`structured_content` could contain raw ndarrays.** `ep.tl.iptw` returns a
+   `CausalEstimate` dataclass whose nested `params` hold ndarrays; `asdict()` put them
+   straight into the metadata channel, so FastMCP failed to serialize and the *entire*
+   causal-inference surface (`iptw`, `aipw`, `g_computation`) errored at the MCP boundary.
+   Fixed with a `_json_safe` sanitizer applied at the `serialize_result` return boundary.
+3. **`run_plot('kaplan_meier')` returned success with no image.** `ep.pl.kaplan_meier`
+   returns a holoviews `Overlay`; `_try_save_holoviews` called `hv.save(..., fmt="png")`
+   without loading or naming the matplotlib backend, defaulted to bokeh (which needs a
+   headless browser), failed, and swallowed the exception. Fixed the backend, and plot
+   dispatch now reports `ok_no_figure` with an `agent_action` instead of a bare `ok`
+   whenever no figure was produced.
+4. **The steering graph advertised calls that cannot succeed.** `encode` (needs
+   `autodetect`), `cox_ph` (needs explicit `covariates`, else matrix singularity), and
+   `covariate_balance` (needs `treatment` and `covariates`) were all suggested bare, in
+   `steering.py`, `WORKFLOW_PROMPT`, and the registered `ehrapy-clustering` prompt — so an
+   agent following the server's own guidance hit an immediate error. The eval had masked
+   this by passing `autodetect: true` while the docs promised the bare form.
+   `test_steering_suggestions_name_their_required_params` now enforces the contract.
+5. **Middleware skipped orchestration stripping for zero-argument tools** (introduced while
+   implementing the #3 hybrid, caught by an existing test).
 
-- Tier-1 check renders the whole DataFrame to Markdown before measuring length;
-  short-circuit on `shape` first. Invisible at MIMIC-II scale, ugly on a real cohort.
+### Eval coverage added
+
+The eval previously asserted only `status == "ok"` and contained **no plot steps and no
+negative paths** — precisely the gap bugs 2–4 lived in. Added `assert_error_code` and
+`assert_image` to the runner, plus three tasks: `plot_surface` (every advertised plot must
+return real `ImageContent`), `error_contracts` (each failure carries its specific code), and
+`causal_inference` (the IPTW result crosses the JSON boundary). 22 → 42 steps.
+
+### Deferred items now fixed
+
+- Tier-1 no longer renders an entire DataFrame to Markdown just to measure it (bounded by
+  cell count first).
+- `_save_figure` steps down a DPI ladder until the 800 KB budget is met and flags
+  `oversized` if it still is not, rather than re-saving once and never re-checking.
+- `_format_cell` no longer raises on list/ndarray cells (`pd.isna` on a sequence returns an
+  array whose truth value is ambiguous).
+- Corrected `docs/installation.md`: `EHRAPY_MCP_READ_ONLY` blocks *agent-directed* writes,
+  but the server still writes cached datasets (including patient-derived data) and PNG
+  artifacts. `run_plot` is documented as `readOnlyHint: true` with disk side effects.
+
+### Still deferred (recorded, not blocking)
+
 - `_sample_rows`: O(n²) `remaining_idx` membership test; `df.loc[idx]` breaks on duplicate
   index values.
 - `mcp = create_server()` at module scope purges the cache as an import side effect.
 - `load_edata` returns the shared cached object. Object invariance across read-only ops was
-  verified to hold today (`uns` and `obs.columns` unchanged after `run_get`/`run_plot`), so
-  this is a known-safe assumption rather than a fix — but it is an assumption.
+  verified to hold (`uns` keys and `obs.columns` unchanged after `run_get`/`run_plot`, and
+  cache `st_mtime_ns` unchanged), so this is a known-safe assumption rather than a fix — but
+  it is an assumption, and a future in-place-mutating `get`/`plot` function would silently
+  diverge memory from disk.
+- `cox_ph` on the full encoded matrix fails with a singularity error. Steering now tells
+  agents to pass explicit covariates; making the underlying call degrade gracefully is an
+  ehrapy-level concern, not an MCP-layer one.

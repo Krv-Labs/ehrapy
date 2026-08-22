@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from fastmcp import Context  # noqa: TC002
 from fastmcp.tools.tool import ToolResult
 
 import ehrapy as ep
@@ -23,12 +24,12 @@ def get_workflow_guide() -> ToolResult:
     return ToolResult(structured_content=struct, content=WORKFLOW_PROMPT)
 
 
-def get_runtime_context() -> ToolResult:
+def get_runtime_context(ctx: Context = None) -> ToolResult:
     """Return MCP runtime environment details including ehrapy version, cache directories, and session handle.
 
     Use this to verify environment state and identify active dataset identifiers.
     """
-    session = get_session()
+    session = get_session(ctx)
     allowed = get_allowed_roots()
     datasets = registry.list_datasets()
 

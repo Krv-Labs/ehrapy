@@ -37,8 +37,37 @@ _TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
 }
 
 
+# Client-side orchestration keys that are not part of any tool schema and are silently dropped.
+_ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
+
+
+def _append_note(result: ToolResult, note: str, folded: list[str]) -> ToolResult:
+    """Append a steering note to a tool result on both channels."""
+    from fastmcp.tools.tool import ToolResult as _ToolResult
+
+    try:
+        blocks = list(result.content or [])
+        blocks.append(mt.TextContent(type="text", text=f"\n\n_{note}_"))
+        struct = result.structured_content
+        if isinstance(struct, dict):
+            struct = {**struct, "folded_arguments": folded}
+        return _ToolResult(content=blocks, structured_content=struct)
+    except Exception:  # noqa: BLE001
+        # Never let the advisory note break an otherwise successful call.
+        return result
+
+
 class ArgumentValidationMiddleware(Middleware):
-    """Middleware that loudly rejects unknown arguments and strips internal framework parameters."""
+    """Reconcile client-supplied arguments with the tool schema before execution.
+
+    Agents routinely pass an ehrapy function's own kwargs at the top level
+    (``run_preprocessing(function='qc_metrics', groupby='service_unit')``) instead of
+    nesting them under ``params``. For tools that take a ``params`` dict, those keys are
+    folded in and the fold is reported back so the agent learns the correct shape
+    (origin fix #3). For tools with no ``params`` -- or keys that survive folding -- the
+    call is rejected with ``UNKNOWN_ARGUMENT`` rather than silently dropped, so a
+    hallucinated argument never passes unnoticed.
+    """
 
     def __init__(self, server: FastMCP) -> None:
         self.server = server
@@ -48,28 +77,55 @@ class ArgumentValidationMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        """Validate input arguments against tool schema before executing."""
-        params = context.message
-        name = params.name
-        arguments = dict(params.arguments or {})
+        """Fold or reject unknown arguments, and strip client orchestration keys."""
+        message = context.message
+        name = message.name
+        arguments = dict(message.arguments or {})
 
         tool = await self.server.get_tool(name)
-        if tool is not None:
-            schema_props = (
-                tool.parameters.get("properties", {})
-                if hasattr(tool, "parameters") and isinstance(tool.parameters, dict)
-                else {}
+        if tool is None:
+            return await call_next(context)
+
+        # Orchestration keys are stripped unconditionally -- including for zero-argument
+        # tools, whose empty schema would otherwise reject them during validation.
+        stripped = _ORCHESTRATION_KEYS & set(arguments)
+        for key in stripped:
+            del arguments[key]
+
+        has_schema = isinstance(getattr(tool, "parameters", None), dict)
+        if not has_schema:
+            if stripped:
+                context = context.copy(message=mt.CallToolRequestParams(name=name, arguments=arguments))
+            return await call_next(context)
+
+        valid_keys = set(tool.parameters.get("properties", {}).keys())
+
+        unknown = set(arguments) - valid_keys
+        folded: list[str] = []
+        if unknown and "params" in valid_keys:
+            existing = arguments.get("params")
+            existing = dict(existing) if isinstance(existing, dict) else {}
+            # An explicit params entry wins over a folded top-level kwarg of the same name.
+            merged = {k: arguments.pop(k) for k in sorted(unknown)}
+            folded = sorted(merged)
+            arguments["params"] = {**merged, **existing}
+            unknown = set()
+
+        if unknown:
+            return unknown_argument_error(name, unknown, valid_keys)
+
+        if folded or stripped:
+            context = context.copy(message=mt.CallToolRequestParams(name=name, arguments=arguments))
+
+        result = await call_next(context)
+
+        if folded:
+            note = (
+                f"Folded top-level argument(s) {', '.join(f'`{k}`' for k in folded)} into `params`. "
+                f"Pass function keyword arguments inside `params` to avoid relying on this."
             )
-            valid_keys = set(schema_props.keys())
-            extra = set(arguments.keys()) - valid_keys - {"wait_for_previous"}
-            if extra:
-                return unknown_argument_error(name, extra, valid_keys)
-
-            if "wait_for_previous" in arguments:
-                clean_args = {k: v for k, v in arguments.items() if k != "wait_for_previous"}
-                context = context.copy(message=mt.CallToolRequestParams(name=name, arguments=clean_args))
-
-        return await call_next(context)
+            result = _append_note(result, note, folded)
+        return result
 
 
 def create_server() -> FastMCP:
@@ -109,7 +165,7 @@ def create_server() -> FastMCP:
         """Prompt template for unsupervised subtyping and clustering of clinical cohorts."""
         return (
             f"Please perform patient sub-phenotyping and clustering on dataset '{dataset}':\n"
-            f"1. Encode categorical features with run_preprocessing(function='encode').\n"
+            f"1. Encode categorical features with run_preprocessing(function='encode', params={{'autodetect': True}}).\n"
             f"2. Impute missing values with run_preprocessing(function='knn_impute').\n"
             f"3. Compute PCA with run_preprocessing(function='pca') and neighbor graph with run_preprocessing(function='neighbors').\n"
             f"4. Perform Leiden clustering with run_analysis(function='leiden', params={{'resolution': {resolution}}}).\n"

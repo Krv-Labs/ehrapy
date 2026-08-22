@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+from fastmcp import Context  # noqa: TC002
 from fastmcp.tools.tool import ToolResult
 
 from ehrapy.mcp.catalog import (
@@ -18,24 +19,22 @@ from ehrapy.mcp.errors import mcp_error, unknown_handle_error
 from ehrapy.mcp.session import get_session
 from ehrapy.mcp.steering import get_suggested_next
 
-from fastmcp import Context  # noqa: TC002
 
-
-async def load_demo_dataset(dataset: str) -> ToolResult:
+async def load_demo_dataset(dataset: str, ctx: Context = None) -> ToolResult:
     """Load a built-in demonstration cohort into the MCP session.
 
     Use 'mimic_2' for ICU mortality and survival workflows, or 'physionet2012' for in-hospital mortality benchmarking.
     Returns a dataset handle (edata_id) for subsequent tool calls.
     """
-    return await run_dispatch("demo", dataset)
+    return await run_dispatch("demo", dataset, ctx=ctx)
 
 
-def fork_edata_handle(edata_id: str | None = None, name: str | None = None) -> ToolResult:
+def fork_edata_handle(edata_id: str | None = None, name: str | None = None, ctx: Context = None) -> ToolResult:
     """Create an independent copy of an existing EHRData dataset handle.
 
     Use this to branch analysis pipelines or preserve intermediate states before destructive transformations.
     """
-    session = get_session()
+    session = get_session(ctx)
     used_latest = False
     handle = edata_id
     if handle is None:
@@ -79,12 +78,12 @@ def fork_edata_handle(edata_id: str | None = None, name: str | None = None) -> T
         return mcp_error("fork_edata_handle", f"Failed to fork handle '{handle}': {exc}", error_code="FORK_ERROR")
 
 
-def get_edata_snapshot(edata_id: str | None = None) -> ToolResult:
+def get_edata_snapshot(edata_id: str | None = None, ctx: Context = None) -> ToolResult:
     """Return structural metadata for an EHRData handle including observation count, variable count, layers, obs columns, and uns keys.
 
     Read-only summary of dataset dimensions.
     """
-    session = get_session()
+    session = get_session(ctx)
     handle = edata_id or session.get_latest_edata_id()
     if handle is None:
         return mcp_error(

@@ -20,7 +20,10 @@ _WORKFLOW_GRAPH: dict[tuple[str, str], list[tuple[str, str]]] = {
         ("get_edata_snapshot()", "Inspect observations, variables, and data structure"),
     ],
     ("preprocessing", "qc_metrics"): [
-        ("run_preprocessing(function='encode')", "Encode categorical columns into numerical representations"),
+        (
+            "run_preprocessing(function='encode', params={'autodetect': True})",
+            "Encode categorical columns into numerical representations",
+        ),
         ("run_plot(function='missing_values_matrix')", "Visualize missing data distribution patterns"),
     ],
     ("preprocessing", "encode"): [
@@ -65,21 +68,34 @@ _WORKFLOW_GRAPH: dict[tuple[str, str], list[tuple[str, str]]] = {
     ],
     ("analysis", "kaplan_meier"): [
         ("run_plot(function='kaplan_meier')", "Render Kaplan-Meier survival curves"),
-        ("run_analysis(function='cox_ph')", "Fit Cox proportional hazards regression model"),
+        (
+            "run_analysis(function='cox_ph', params={'duration_col': ..., 'event_col': ..., 'covariates': [...]})",
+            "Fit Cox proportional hazards regression model (pass explicit covariates; the full "
+            "encoded matrix is collinear and fails with a singularity error)",
+        ),
     ],
     ("analysis", "cox_ph"): [
         ("run_plot(function='cox_ph_forestplot')", "Render forest plot of hazard ratios and confidence intervals"),
     ],
     ("analysis", "iptw"): [
-        ("run_analysis(function='covariate_balance')", "Check post-weighting covariate balance"),
+        (
+            "run_analysis(function='covariate_balance', params={'treatment': ..., 'covariates': [...]})",
+            "Check post-weighting covariate balance (`treatment` and `covariates` are required)",
+        ),
         ("run_plot(function='love_plot')", "Render Love plot comparing unadjusted vs adjusted balance"),
     ],
     ("analysis", "aipw"): [
-        ("run_analysis(function='covariate_balance')", "Check post-weighting covariate balance"),
+        (
+            "run_analysis(function='covariate_balance', params={'treatment': ..., 'covariates': [...]})",
+            "Check post-weighting covariate balance (`treatment` and `covariates` are required)",
+        ),
         ("run_plot(function='love_plot')", "Render Love plot comparing balance"),
     ],
     ("analysis", "g_computation"): [
-        ("run_analysis(function='covariate_balance')", "Assess causal treatment effect and covariate balance"),
+        (
+            "run_analysis(function='covariate_balance', params={'treatment': ..., 'covariates': [...]})",
+            "Assess causal treatment effect and covariate balance (`treatment` and `covariates` are required)",
+        ),
     ],
 }
 

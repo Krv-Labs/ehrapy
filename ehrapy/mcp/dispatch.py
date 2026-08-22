@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import inspect
 import time
 from pathlib import Path
@@ -12,15 +13,16 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from fastmcp import Context  # noqa: TC002
 from fastmcp.tools.tool import ToolResult
 from fastmcp.utilities.types import Image
 
 from ehrapy.mcp.catalog import get_callable, get_namespace_kind
 from ehrapy.mcp.edata_store import load_edata, persist_edata, save_edata
 from ehrapy.mcp.errors import (
+    classify_exception_error,
     mcp_error,
     path_access_error,
-    unknown_argument_error,
     unknown_handle_error,
 )
 from ehrapy.mcp.policy import PathNotAllowedError, ReadOnlyModeError, check_path_allowed
@@ -28,8 +30,6 @@ from ehrapy.mcp.registry import registry
 from ehrapy.mcp.serialization import serialize_result
 from ehrapy.mcp.session import get_session
 from ehrapy.mcp.steering import get_suggested_next
-
-from fastmcp import Context  # noqa: TC002
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,19 +51,89 @@ SLOW_FUNCTIONS = frozenset(
 )
 
 
-def _inject_edata(fn: Callable[..., Any], edata: Any, params: dict[str, Any]) -> Any:
-    """Inject edata as first positional parameter if required by signature."""
+_FITTER_CACHE_CAPACITY = 8
+_FITTER_CACHE: collections.OrderedDict[tuple[str, str], Any] = collections.OrderedDict()
+
+# Plot functions whose first parameter is a fitted model/result rather than the EHRData
+# object, mapped to the run_analysis function that produces it. Ported from origin fix #5.
+_PLOT_FITTER_SOURCES: dict[str, tuple[str, str]] = {
+    # plot function -> (analysis function that fits it, parameter name it binds to)
+    "kaplan_meier": ("kaplan_meier", "kmfs"),
+    "love_plot": ("covariate_balance", "balance"),
+    "propensity_overlap": ("positivity_check", "positivity"),
+}
+
+
+def cache_fitter(edata_id: str, function: str, value: Any) -> None:
+    """Record a fitted model so a downstream plot call can bind it (bounded LRU)."""
+    key = (edata_id, function)
+    if key in _FITTER_CACHE:
+        _FITTER_CACHE.move_to_end(key)
+    _FITTER_CACHE[key] = value
+    while len(_FITTER_CACHE) > _FITTER_CACHE_CAPACITY:
+        _FITTER_CACHE.popitem(last=False)
+
+
+def get_fitter(edata_id: str, function: str) -> Any | None:
+    """Return a cached fitter for a handle, if one was recorded."""
+    key = (edata_id, function)
+    if key not in _FITTER_CACHE:
+        return None
+    _FITTER_CACHE.move_to_end(key)
+    return _FITTER_CACHE[key]
+
+
+def clear_fitter_cache() -> None:
+    """Clear the fitter cache (useful for testing)."""
+    _FITTER_CACHE.clear()
+
+
+def _build_call_params(
+    fn: Callable[..., Any],
+    edata: Any,
+    params: dict[str, Any],
+    *,
+    edata_id: str | None = None,
+    function: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    """Build the kwargs for a dispatched call, binding edata or a fitted model as needed.
+
+    Most ehrapy functions take the EHRData object first. A few plot functions instead take a
+    fitted model produced by an earlier run_analysis call (ported from origin fix #5); for
+    those, bind the cached fitter -- or the copy persisted in ``edata.uns`` -- rather than
+    handing them an EHRData they cannot use.
+    """
     sig = inspect.signature(fn)
     param_names = list(sig.parameters.keys())
     if not param_names:
-        return fn(**params)
+        return dict(params)
 
     first_param = param_names[0]
     if first_param in params:
-        return fn(**params)
+        return dict(params)
 
-    # First parameter receives edata
-    return fn(edata, **params)
+    if kind == "plot" and function in _PLOT_FITTER_SOURCES:
+        source_fn, bind_name = _PLOT_FITTER_SOURCES[function]
+        if bind_name in sig.parameters:
+            fitted = get_fitter(edata_id or "", source_fn)
+            if fitted is None and hasattr(edata, "uns"):
+                fitted = edata.uns.get(source_fn)
+            if fitted is None:
+                raise ValueError(
+                    f"No fitted result available for plot '{function}'. "
+                    f"Run run_analysis(function='{source_fn}', ...) on this handle first."
+                )
+            if bind_name == "kmfs" and not isinstance(fitted, (list, tuple)):
+                fitted = [fitted]
+            return {bind_name: fitted, **params}
+
+    return {first_param: edata, **params}
+
+
+def _inject_edata(fn: Callable[..., Any], edata: Any, params: dict[str, Any], **kwargs: Any) -> Any:
+    """Call ``fn`` with edata (or a fitted model) bound to its first parameter."""
+    return fn(**_build_call_params(fn, edata, params, **kwargs))
 
 
 async def run_dispatch(
@@ -78,7 +148,7 @@ async def run_dispatch(
     """Execute a function from an ehrapy namespace and return a dual-channel ToolResult."""
     params = dict(params or {})
     tool_name = f"run_{namespace}" if namespace != "demo" else "load_demo_dataset"
-    session = get_session()
+    session = get_session(ctx)
 
     # Progress reporting for slow functions
     if ctx is not None and function in SLOW_FUNCTIONS:
@@ -203,7 +273,9 @@ async def run_dispatch(
         except FileNotFoundError:
             return path_access_error(tool_name, str(params.get("filename") or params.get("path") or ""))
         except Exception as exc:  # noqa: BLE001
-            return mcp_error(tool_name, f"IO read failed: {exc}", error_code="IO_READ_ERROR")
+            return classify_exception_error(
+                tool_name, exc, namespace=namespace, function=function, fallback_code="IO_READ_ERROR"
+            )
 
     # For all other operations, resolve the active dataset handle
     used_latest = False
@@ -269,7 +341,9 @@ async def run_dispatch(
 
             return ToolResult(structured_content=struct, content=md_content)
         except Exception as exc:  # noqa: BLE001
-            return mcp_error(tool_name, f"Get operation failed: {exc}", error_code="GET_ERROR")
+            return classify_exception_error(
+                tool_name, exc, namespace=namespace, function=function, fallback_code="GET_ERROR"
+            )
 
     # 4. Plot namespace (T10)
     if kind == "plot":
@@ -278,9 +352,12 @@ async def run_dispatch(
             sig = inspect.signature(fn)
             if "show" in sig.parameters and "show" not in params:
                 params["show"] = False
+            # Prefer an explicit figure handle over scraping plt.gcf() (origin fix #4).
+            if "return_fig" in sig.parameters and "return_fig" not in params:
+                params["return_fig"] = True
 
             plt.close("all")
-            res = _inject_edata(fn, edata, params)
+            res = _inject_edata(fn, edata, params, edata_id=handle, function=function, kind="plot")
             if res is None and plt.get_fignums():
                 res = plt.gcf()
 
@@ -294,13 +371,23 @@ async def run_dispatch(
             plt.close("all")
 
             suggestions = get_suggested_next(namespace, function)
+            rendered = meta.get("type") == "figure"
             struct = {
-                "status": "ok",
+                "status": "ok" if rendered else "ok_no_figure",
                 "edata_id": handle,
                 "namespace": namespace,
                 "function": function,
                 **meta,
             }
+            if not rendered:
+                # A plot call that produced no image previously reported a bare "ok",
+                # leaving the agent to assume a figure existed.
+                struct["agent_action"] = (
+                    f"'{function}' returned {meta.get('type', 'no renderable figure')} rather than a figure. "
+                    "Check that the required inputs were fitted first, or call "
+                    f"get_function_help(namespace='{namespace}', function='{function}')."
+                )
+
             if used_latest:
                 struct["used_latest"] = True
             if suggestions:
@@ -323,7 +410,9 @@ async def run_dispatch(
             return ToolResult(structured_content=struct, content=content_blocks)
         except Exception as exc:  # noqa: BLE001
             plt.close("all")
-            return mcp_error(tool_name, f"Plot rendering failed: {exc}", error_code="PLOT_ERROR")
+            return classify_exception_error(
+                tool_name, exc, namespace=namespace, function=function, fallback_code="PLOT_ERROR"
+            )
 
     # 5. IO write / export / to_pandas functions
     if kind == "io":
@@ -386,12 +475,16 @@ async def run_dispatch(
                 agent_action=exc.agent_action,
             )
         except Exception as exc:  # noqa: BLE001
-            return mcp_error(tool_name, f"IO operation failed: {exc}", error_code="IO_ERROR")
+            return classify_exception_error(
+                tool_name, exc, namespace=namespace, function=function, fallback_code="IO_ERROR"
+            )
 
     # 6. Mutating edata namespaces (preprocessing & analysis)
     if kind == "edata":
         try:
-            res = _inject_edata(fn, edata, params)
+            res = _inject_edata(fn, edata, params, edata_id=handle, function=function, kind=kind)
+            if res is not None and function in {src for src, _ in _PLOT_FITTER_SOURCES.values()}:
+                cache_fitter(handle, function, res)
             if hasattr(res, "n_obs") and hasattr(res, "n_vars"):
                 # Function returned a modified copy
                 edata = res
@@ -472,11 +565,6 @@ async def run_dispatch(
                 agent_action=f"Inspect data or parameters for {namespace}.{function}.",
             )
         except Exception as exc:  # noqa: BLE001
-            return mcp_error(
-                tool_name,
-                f"Execution failed in {namespace}.{function}: {exc}",
-                error_code="EXECUTION_ERROR",
-                agent_action=f"Call get_function_help(namespace='{namespace}', function='{function}') to verify usage.",
-            )
+            return classify_exception_error(tool_name, exc, namespace=namespace, function=function)
 
     return mcp_error(tool_name, f"Unhandled namespace kind '{kind}'", error_code="UNHANDLED_KIND")

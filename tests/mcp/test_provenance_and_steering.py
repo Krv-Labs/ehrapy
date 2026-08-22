@@ -16,17 +16,52 @@ def _run(coro):
 
 
 def test_argument_validation_middleware_rejects_unknown_args() -> None:
-    """Test that middleware loudly rejects unknown arguments (T5)."""
+    """A tool without a `params` dict rejects unknown arguments loudly (T5, origin #3)."""
 
     async def _test():
         async with Client(mcp) as client:
             res = await client.call_tool(
-                "run_preprocessing",
-                {"function": "qc_metrics", "unknown_bogus_arg": 123},
+                "get_edata_snapshot",
+                {"unknown_bogus_arg": 123},
             )
             assert res.structured_content["status"] == "error"
             assert res.structured_content["error_code"] == "UNKNOWN_ARGUMENT"
             assert "unknown_bogus_arg" in res.structured_content["details"]["unknown_arguments"]
+
+    _run(_test())
+
+
+def test_argument_validation_middleware_folds_kwargs_into_params() -> None:
+    """A tool with a `params` dict folds stray top-level kwargs into it (origin #3)."""
+
+    async def _test():
+        async with Client(mcp) as client:
+            await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            res = await client.call_tool(
+                "run_get",
+                {"function": "obs_df", "keys": ["age"]},
+            )
+            struct = res.structured_content
+            assert struct["status"] == "ok", struct
+            assert struct["folded_arguments"] == ["keys"]
+
+    _run(_test())
+
+
+def test_explicit_params_win_over_folded_kwarg() -> None:
+    """An explicit params entry is not clobbered by a folded top-level kwarg of the same name."""
+
+    async def _test():
+        async with Client(mcp) as client:
+            await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            res = await client.call_tool(
+                "run_get",
+                {"function": "obs_df", "params": {"keys": ["age"]}, "keys": ["bmi"]},
+            )
+            assert res.structured_content["status"] == "ok"
+            # params={'keys': ['age']} wins, so the rendered table is the age column.
+            text = " ".join(getattr(c, "text", "") for c in res.content)
+            assert "age" in text
 
     _run(_test())
 

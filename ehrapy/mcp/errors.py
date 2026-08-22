@@ -122,3 +122,88 @@ def unknown_argument_error(tool: str, extra_keys: set[str], valid_keys: set[str]
             "valid_arguments": sorted(valid_keys),
         },
     )
+
+
+def classify_exception_error(
+    tool: str,
+    exc: Exception,
+    *,
+    namespace: str | None = None,
+    function: str | None = None,
+    fallback_code: str = "EXECUTION_ERROR",
+    fallback_action: str | None = None,
+) -> ToolResult:
+    """Classify an exception into a structured error ToolResult with a specific error_code.
+
+    Ported from origin fix #6. Every branch yields a non-generic ``error_code`` and an
+    ``agent_action``, so an agent that hits a failure always has a next move.
+    """
+    exc_type = type(exc).__name__
+    exc_msg = str(exc)
+    details: dict[str, Any] = {"exception_type": exc_type}
+    if namespace:
+        details["namespace"] = namespace
+    if function:
+        details["function"] = function
+
+    help_action = (
+        f"Call get_function_help(namespace='{namespace}', function='{function}') to inspect expected parameters."
+        if namespace and function
+        else "Inspect the tool parameters and retry."
+    )
+
+    if isinstance(exc, (ImportError, ModuleNotFoundError)) or "Install with" in exc_msg:
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="DEPENDENCY_MISSING",
+            agent_action="Install the required optional dependency or ehrapy extra, then retry.",
+            details=details,
+        )
+
+    if isinstance(exc, TypeError):
+        return mcp_error(tool, exc_msg, error_code="INVALID_INPUT", agent_action=help_action, details=details)
+
+    if isinstance(exc, FileNotFoundError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="FILE_NOT_FOUND",
+            agent_action="Verify the file path exists on the MCP host filesystem.",
+            details=details,
+        )
+
+    if isinstance(exc, KeyError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="FUNCTION_UNKNOWN" if "Unknown" in exc_msg else "KEY_NOT_FOUND",
+            agent_action=("Check the requested key or column name against get_edata_snapshot() for available columns."),
+            details=details,
+        )
+
+    if isinstance(exc, AttributeError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="INVALID_INPUT",
+            agent_action=help_action,
+            details=details,
+        )
+
+    if isinstance(exc, ValueError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="INVALID_VALUE",
+            agent_action=fallback_action or help_action,
+            details=details,
+        )
+
+    return mcp_error(
+        tool,
+        exc_msg,
+        error_code=fallback_code,
+        agent_action=fallback_action or help_action,
+        details=details,
+    )
