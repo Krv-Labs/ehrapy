@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import os
+import sys
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 
 from ehrapy.mcp.server import mcp
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    pass
 
 
 def _run(coro):
@@ -107,5 +105,51 @@ def test_demo_preprocessing_and_get() -> None:
             )
             assert get_res.structured_content["status"] == "ok"
             assert get_res.structured_content["edata_id"] == edata_id
+
+    _run(_test())
+
+
+def test_stdio_end_to_end(tmp_path: Path) -> None:
+    csv_path = tmp_path / "patients.csv"
+    csv_path.write_text("patient_id,age,sex\np1,45,F\np2,62,M\n", encoding="utf-8")
+    cache_dir = tmp_path / "mcp-cache"
+    env = {**os.environ, "EHRAPY_MCP_CACHE_DIR": str(cache_dir)}
+    transport = StdioTransport(
+        command=sys.executable,
+        args=["-m", "ehrapy.mcp.server"],
+        env=env,
+        cwd=str(Path(__file__).parents[2]),
+        keep_alive=False,
+    )
+
+    async def _test():
+        async with Client(transport) as client:
+            tools = await client.list_tools()
+            assert {tool.name for tool in tools} >= {"load_demo_dataset", "ingest_dataset", "get_edata_snapshot"}
+
+            guide = await client.call_tool("get_workflow_guide", {})
+            assert guide.structured_content["status"] == "ok"
+
+            demo = await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            assert demo.structured_content["status"] == "ok"
+            demo_id = demo.structured_content["edata_id"]
+
+            qc = await client.call_tool(
+                "run_preprocessing",
+                {"function": "qc_metrics", "edata_id": demo_id, "params": {"qc_vars": []}},
+            )
+            assert qc.structured_content["status"] == "ok"
+
+            ingested = await client.call_tool(
+                "ingest_dataset",
+                {"file_path": str(csv_path), "index_col": "patient_id"},
+            )
+            assert ingested.structured_content["status"] == "ok"
+            ingested_id = ingested.structured_content["edata_id"]
+
+            snapshot = await client.call_tool("get_edata_snapshot", {"edata_id": ingested_id})
+            assert snapshot.structured_content["status"] == "ok"
+            assert snapshot.structured_content["n_obs"] == 2
+            assert snapshot.structured_content["n_vars"] == 2
 
     _run(_test())
