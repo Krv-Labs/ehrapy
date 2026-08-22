@@ -1,7 +1,7 @@
 """Regression tests for fixes ported from origin/feat/add-mcp-tooling and found by dogfooding.
 
-Each test here corresponds to a defect that was live at merge time; see
-MCP_UPGRADE_PLAN.md Phase 8 for the mapping back to origin's issue numbers.
+Each test here corresponds to a defect that was live at merge time. The mapping back to
+origin's issue numbers is in the merge commit message (`git log --grep='port origin fixes'`).
 """
 
 from __future__ import annotations
