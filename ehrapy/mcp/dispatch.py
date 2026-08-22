@@ -25,6 +25,9 @@ def _coerce_params(fn: Any, params: dict[str, Any] | None) -> dict[str, Any]:
     coerced: dict[str, Any] = {}
     for key, value in params.items():
         if key not in sig.parameters:
+            if key == "store" and "filename" in sig.parameters:
+                coerced["filename"] = value
+                continue
             coerced[key] = value
             continue
         ann = sig.parameters[key].annotation

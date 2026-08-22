@@ -90,3 +90,73 @@ def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> str:
         agent_action=(f"Create or retrieve a valid {handle_name} before retrying this tool."),
         details={handle_name: handle_value},
     )
+
+
+def classify_exception_error(
+    tool: str,
+    exc: Exception,
+    *,
+    namespace: str | None = None,
+    function: str | None = None,
+) -> str:
+    """Classify an exception into a structured MCP error envelope with a non-null error_code."""
+    exc_type = type(exc).__name__
+    exc_msg = str(exc)
+
+    if isinstance(exc, TypeError):
+        action = (
+            f"Call get_function_help('{namespace or 'dispatch'}', '{function}') to inspect expected parameters."
+            if function
+            else "Inspect tool parameters."
+        )
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="INVALID_INPUT",
+            agent_action=action,
+            details={"exception_type": exc_type, "function": function, "namespace": namespace},
+        )
+
+    if isinstance(exc, (ImportError, ModuleNotFoundError)) or "Install with" in exc_msg or "requires" in exc_msg:
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="DEPENDENCY_MISSING",
+            agent_action="Install the required optional dependency or extra package.",
+            details={"exception_type": exc_type},
+        )
+
+    if isinstance(exc, KeyError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="KEY_NOT_FOUND" if "Unknown" not in exc_msg else "FUNCTION_UNKNOWN",
+            agent_action="Check the provided key, column name, or function name.",
+            details={"exception_type": exc_type},
+        )
+
+    if isinstance(exc, FileNotFoundError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="FILE_NOT_FOUND",
+            agent_action="Verify the file path exists on the host filesystem.",
+            details={"exception_type": exc_type},
+        )
+
+    if isinstance(exc, ValueError):
+        return mcp_error(
+            tool,
+            exc_msg,
+            error_code="INVALID_INPUT",
+            agent_action="Check argument types and values.",
+            details={"exception_type": exc_type},
+        )
+
+    return mcp_error(
+        tool,
+        exc_msg,
+        error_code="INTERNAL",
+        agent_action="Check server logs or retry with valid inputs.",
+        details={"exception_type": exc_type},
+    )

@@ -13,12 +13,14 @@ from ehrapy.mcp.server import mcp
 from ehrapy.mcp.session import get_session
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
 from ehrapy.mcp.tools.dispatch_tools import (
+    export_edata,
     get_edata_snapshot,
     get_function_help,
     list_ehrapy_functions,
     load_demo_dataset,
     run_analysis,
     run_get,
+    run_io,
     run_plot,
     run_preprocessing,
 )
@@ -205,4 +207,40 @@ def test_kaplan_meier_analysis_and_plot() -> None:
     assert plot_res["result"]["type"] == "figure"
     assert "kaplan_meier" in plot_res["result"]["path"]
     assert len(plot_res["result"]["image_base64"]) > 100
+
+
+def test_export_edata_contracts(tmp_path: Path) -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+
+    h5ed_path = tmp_path / "export.h5ed"
+    res_h5ed = json.loads(_run(export_edata(str(h5ed_path), edata_id=edata_id, format="h5ed")))
+    assert res_h5ed["status"] == "ok"
+    assert res_h5ed["format"] == "h5ed"
+    assert res_h5ed["path"] == str(h5ed_path)
+    assert res_h5ed["edata_id"] == edata_id
+    assert h5ed_path.exists()
+
+    csv_path = tmp_path / "export.csv"
+    res_csv = json.loads(_run(export_edata(str(csv_path), edata_id=edata_id, format="csv")))
+    assert res_csv["status"] == "ok"
+    assert res_csv["format"] == "csv"
+    assert res_csv["path"] == str(csv_path)
+    assert res_csv["edata_id"] == edata_id
+    assert csv_path.exists()
+
+
+def test_error_code_mapping() -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+
+    # TypeError (missing required positional argument) -> INVALID_INPUT
+    res_err = json.loads(_run(run_analysis("kaplan_meier", edata_id=edata_id, params={})))
+    assert res_err["status"] == "error"
+    assert res_err["error_code"] == "INVALID_INPUT"
+    assert res_err["agent_action"] is not None
+
+    # from_pandas is removed from io catalog
+    io_funcs = json.loads(_run(list_ehrapy_functions("io")))
+    assert "from_pandas" not in io_funcs["functions"]
 

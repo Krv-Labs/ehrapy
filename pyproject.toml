@@ -76,7 +76,7 @@ dask = [
     "dask-ml>=2025.1.0",
 ]
 leiden = ["igraph"]  # careful - GPL
-mcp = ["fastmcp>=2.0"]
+mcp = ["fastmcp>=2.0", "igraph"]
 rapids12 = ["rapids-singlecell[rapids12]"]
 rapids13 = ["rapids-singlecell[rapids13]"]
 dev = [

@@ -75,7 +75,6 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             "read_h5ad",
             "read_h5ed",
             "read_zarr",
-            "from_pandas",
             "write_h5ad",
             "write_h5ed",
             "write_zarr",

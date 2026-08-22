@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 from ehrapy.mcp.catalog import catalog_summary, list_functions, list_namespaces
 from ehrapy.mcp.dispatch import dispatch_json, help_json
 from ehrapy.mcp.edata_store import fork_edata, load_edata
-from ehrapy.mcp.errors import mcp_error, unknown_handle_error
+from ehrapy.mcp.errors import classify_exception_error, mcp_error, unknown_handle_error
 from ehrapy.mcp.session import get_session
 
 
@@ -84,7 +84,7 @@ async def _run_namespace(
     except ValueError as exc:
         return mcp_error(tool, str(exc), error_code="INVALID_INPUT")
     except Exception as exc:  # noqa: BLE001
-        return mcp_error(tool, str(exc))
+        return classify_exception_error(tool, exc, namespace=namespace, function=function)
 
 
 async def run_preprocessing(
@@ -186,29 +186,43 @@ async def export_edata(
     format: str = "h5ed",
     ctx: Context = None,
 ) -> str:
-    """Write cached EHRData to a host-visible path (h5ed or csv via to_pandas)."""
+    """Write cached EHRData to a host-visible path (h5ed, csv, zarr, h5ad)."""
     session = get_session(ctx)
     handle = edata_id or session.edata_id
     if not handle:
         return mcp_error("export_edata", "No edata_id provided.", error_code="EDATA_ID_MISSING")
     try:
-        if format == "h5ed":
-            return await run_io("write_h5ed", handle, {"filename": path}, ctx)
-        if format == "csv":
+        edata = load_edata(handle)
+        fmt = format.lower()
+        if fmt == "h5ed":
+            from ehrdata.io import write_h5ed
+
+            write_h5ed(edata, path)
+            return json.dumps({"status": "ok", "path": path, "format": "h5ed", "edata_id": handle}, indent=2)
+        if fmt == "csv":
             from ehrdata.io import to_pandas
 
-            edata = load_edata(handle)
             df = to_pandas(edata)
             df.to_csv(path, index=False)
-            return json.dumps({"status": "ok", "path": path, "format": "csv"}, indent=2)
+            return json.dumps({"status": "ok", "path": path, "format": "csv", "edata_id": handle}, indent=2)
+        if fmt == "zarr":
+            from ehrdata.io import write_zarr
+
+            write_zarr(edata, path)
+            return json.dumps({"status": "ok", "path": path, "format": "zarr", "edata_id": handle}, indent=2)
+        if fmt == "h5ad":
+            from ehrdata.io import write_h5ad
+
+            write_h5ad(edata, path)
+            return json.dumps({"status": "ok", "path": path, "format": "h5ad", "edata_id": handle}, indent=2)
         return mcp_error(
             "export_edata",
             f"Unsupported format '{format}'.",
             error_code="FORMAT_UNSUPPORTED",
-            agent_action="Use format='h5ed' or 'csv'.",
+            agent_action="Use format='h5ed', 'csv', 'zarr', or 'h5ad'.",
         )
     except Exception as exc:  # noqa: BLE001
-        return mcp_error("export_edata", str(exc))
+        return classify_exception_error("export_edata", exc)
 
 
 async def get_edata_snapshot(

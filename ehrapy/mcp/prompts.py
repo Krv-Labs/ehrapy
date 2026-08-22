@@ -23,17 +23,19 @@ Discovery: `list_ehrapy_functions`, `get_function_help(namespace, function)`.
 1. `load_demo_dataset("mimic_2")` or `ingest_dataset(path)`
 2. `get_edata_snapshot`
 3. `run_preprocessing("qc_metrics", params={...})`
-4. `run_preprocessing("encode")`
+4. `run_preprocessing("encode", params={"autodetect": true})`
 5. `run_plot("missing_values_matrix")`
 
 ### Clustering
-1. `run_preprocessing("highly_variable_features")`
-2. `run_preprocessing("pca")`
-3. `run_preprocessing("neighbors")`
-4. `run_analysis("umap")`
-5. `run_analysis("leiden")`
-6. `run_analysis("rank_features_groups", params={"groupby": "leiden"})`
-7. `run_get("rank_features_groups_df", params={"groupby": "leiden"})`
+1. `run_preprocessing("encode", params={"autodetect": true})`
+2. `run_preprocessing("simple_impute")`
+3. `run_preprocessing("highly_variable_features")`
+4. `run_preprocessing("pca")`
+5. `run_preprocessing("neighbors")`
+6. `run_analysis("umap")`
+7. `run_analysis("leiden")`
+8. `run_analysis("rank_features_groups", params={"groupby": "leiden"})`
+9. `run_get("rank_features_groups_df", params={"group": "0"})`
 
 ### Survival
 1. `run_analysis("stratified_table_one", params={...})`
