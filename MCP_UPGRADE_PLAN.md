@@ -297,3 +297,61 @@ Method: real MCP client round-trip (`fastmcp.Client` in-memory against `ehrapy.m
 | Static: 200×50 DataFrame at serializer limits | ~424K chars (~106K tok) | ≤ 10K chars hard cap | T2 backstop |
 
 Also verified live: `outputSchema` is the `{"result": string}` wrapper on every tool (T6); `anyOf:[T,null]` unions present in every optional param (T13); descriptions are single sentences (T8); `params` is an open `additionalProperties: true` object (inherent to dispatch — mitigated by T7).
+
+---
+
+## Phase 8 — Merge with `origin/feat/add-mcp-tooling` (2026-08-21)
+
+Origin advanced 5 commits (`887bd60`..`f5ac5b2`) fixing numbered issues #2–#12 while this
+rewrite was in progress. The two sides have **incompatible return contracts** — origin's
+`dispatch.py` returns `dict` payloads from `_ok()`, this rewrite returns `ToolResult`
+(dual-channel, see §0). A line-level merge is therefore not meaningful: 13 files conflict
+and nearly every hunk would be resolved by discarding one side wholesale.
+
+**Recorded as:** `git merge -s ours` (marks origin merged, keeps this tree) followed by a
+port commit applying each origin fix to the new architecture. This checklist was written
+*before* the `-s ours` merge — after it, origin's fixes are invisible to `git log`.
+
+### Port checklist
+
+| Issue | Origin commit | Status in rewrite | Action |
+|---|---|---|---|
+| #2, #12 obs/var names in snapshot | `887bd60` | ✅ already present | none |
+| #3 fold top-level kwargs into `params` | `58d6d9f` | ❌ **inverted** (rewrite rejects) | **hybrid**: fold when tool has `params`, else `UNKNOWN_ARGUMENT` |
+| #10 thread-safe session | `58d6d9f` | ❌ lost (plain dict) | port lock + `request_id` fallback |
+| #4 plot `return_fig=True` | `e54c354` | ❌ lost (only `show=False`) | port |
+| #5 kmf / balance / positivity injection | `e54c354` | ❌ lost — **proven broken** | port (bounded cache, prefer `uns`) |
+| #11 base64 image naming | `e54c354` | ✅ works (`Image(path=)`) | none |
+| #6 `classify_exception_error` | `811efe9` | ❌ lost | port + wire into **all** dispatch branches |
+| #7, #8 export contracts, guide | `811efe9` | ✅ verified empirically | none |
+| #9 `igraph` in `mcp` extra | `811efe9` | ❌ lost | port |
+| runtime `Context` import | `f5ac5b2` | ✅ already present | none |
+
+### Decisions taken (2026-08-21, with repo owner)
+
+- **#3 → hybrid.** Fold plausible function kwargs into `params` when the tool exposes a
+  `params` property and say so in the response; reject with `UNKNOWN_ARGUMENT` when the tool
+  has no `params` or the key survives folding. Always strip `wait_for_previous`.
+  Implemented in `ArgumentValidationMiddleware`, *not* by resurrecting `AgnosticFastMCP` —
+  middleware is the composable hook and is already wired.
+- **`summarize_edata` dropped.** The 14-tool surface (T5) is deliberate and
+  `get_edata_snapshot` covers it. `tools/inspection.py` deleted rather than left as dead
+  code. This is a decision, not a merge casualty.
+
+### Own bugs found while dogfooding (not origin regressions)
+
+- **Session state leaked across clients.** Every tool called `get_session()` with no `ctx`,
+  so per-client isolation in `session.py` was dead code and client B saw client A's active
+  `edata_id`. Fixed by threading `ctx` through *and* making the session thread-safe —
+  fixing only the former converts a latent bug into a live race.
+
+### Deferred (recorded, not blocking)
+
+- Tier-1 check renders the whole DataFrame to Markdown before measuring length;
+  short-circuit on `shape` first. Invisible at MIMIC-II scale, ugly on a real cohort.
+- `_sample_rows`: O(n²) `remaining_idx` membership test; `df.loc[idx]` breaks on duplicate
+  index values.
+- `mcp = create_server()` at module scope purges the cache as an import side effect.
+- `load_edata` returns the shared cached object. Object invariance across read-only ops was
+  verified to hold today (`uns` and `obs.columns` unchanged after `run_get`/`run_plot`), so
+  this is a known-safe assumption rather than a fix — but it is an assumption.
