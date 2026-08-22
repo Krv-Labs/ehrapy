@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import TYPE_CHECKING, Any
 
 import ehrdata.dt as ed_dt
@@ -120,18 +121,27 @@ def get_namespace_kind(namespace: str) -> str:
     return NAMESPACES[namespace]["kind"]
 
 
+def _clean_annotation(ann: str) -> str:
+    s = re.sub(r"<class '(?:[a-zA-Z0-9_.]+\.)?([a-zA-Z0-9_]+)'>", r"\1", ann)
+    s = re.sub(r"\b(?:typing|collections\.abc)\.", "", s)
+    s = re.sub(r"(\s*\|\s*None)+", r" | None", s)
+    return s
+
+
 def function_help(namespace: str, function: str) -> dict[str, Any]:
     """Return signature metadata and a short docstring."""
     fn = get_callable(namespace, function)
     sig = inspect.signature(fn)
     doc = inspect.getdoc(fn) or ""
+    if namespace == "get" and function == "var_df" and doc.startswith("Return values for observations"):
+        doc = "Return values for variables/features in edata.\n\n" + doc
     params = []
     for name, param in sig.parameters.items():
         entry: dict[str, Any] = {"name": name}
         if param.default is not inspect.Parameter.empty:
             entry["default"] = repr(param.default)
         if param.annotation is not inspect.Parameter.empty:
-            entry["annotation"] = str(param.annotation)
+            entry["annotation"] = _clean_annotation(str(param.annotation))
         params.append(entry)
     return {
         "namespace": namespace,

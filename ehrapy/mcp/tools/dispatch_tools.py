@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastmcp import Context
+if TYPE_CHECKING:
+    from fastmcp import Context
 
 from ehrapy.mcp.catalog import catalog_summary, list_functions, list_namespaces
 from ehrapy.mcp.dispatch import dispatch_json, help_json
@@ -144,6 +145,14 @@ async def load_demo_dataset(
     ctx: Context = None,
 ) -> str:
     """Load a built-in ehrdata.dt demo cohort (mimic_2, physionet2012, ...)."""
+    available_datasets = list_functions("dt")
+    if dataset not in available_datasets:
+        return mcp_error(
+            "load_demo_dataset",
+            f"Unknown dataset '{dataset}' in namespace 'dt'.",
+            error_code="DATASET_UNKNOWN",
+            agent_action=f"Use one of: {', '.join(available_datasets)}",
+        )
     return await _run_namespace("load_demo_dataset", "dt", dataset, None, params, True, ctx)
 
 
@@ -213,17 +222,20 @@ async def get_edata_snapshot(
         return mcp_error("get_edata_snapshot", "No edata_id provided.", error_code="EDATA_ID_MISSING")
     try:
         edata = load_edata(handle)
+        layers = [str(k) for k in getattr(edata, "layers", {}).keys() if k is not None]
         payload = {
             "status": "ok",
             "edata_id": handle,
             "n_obs": edata.n_obs,
             "n_vars": edata.n_vars,
             "shape": list(edata.shape),
-            "obs_columns": list(edata.obs.columns[:100]),
-            "var_columns": list(edata.var.columns[:100]),
-            "layers": list(getattr(edata, "layers", {}).keys()),
-            "obsm_keys": list(getattr(edata, "obsm", {}).keys()),
-            "uns_keys": list(getattr(edata, "uns", {}).keys()),
+            "obs_names": [str(x) for x in edata.obs_names[:100]],
+            "var_names": [str(x) for x in edata.var_names[:100]],
+            "obs_columns": [str(x) for x in edata.obs.columns[:100]],
+            "var_columns": [str(x) for x in edata.var.columns[:100]],
+            "layers": layers,
+            "obsm_keys": [str(k) for k in getattr(edata, "obsm", {}).keys() if k is not None],
+            "uns_keys": [str(k) for k in getattr(edata, "uns", {}).keys() if k is not None],
         }
         return json.dumps(payload, indent=2)
     except KeyError:

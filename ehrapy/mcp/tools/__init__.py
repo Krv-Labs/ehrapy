@@ -30,6 +30,7 @@ ALL_TOOLS_LIST = [
     fork_edata_handle,
     export_edata,
     get_edata_snapshot,
+    summarize_edata,
     # Dispatch (full ehrapy API surface)
     run_preprocessing,
     run_analysis,

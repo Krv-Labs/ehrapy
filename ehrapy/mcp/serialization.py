@@ -18,7 +18,9 @@ _SCALAR_TYPES = (str, int, float, bool, np.integer, np.floating, np.bool_)
 
 
 def _truncate_df(df: pd.DataFrame) -> dict[str, Any]:
-    truncated = df.shape[0] > _MAX_ROWS or df.shape[1] > _MAX_COLS
+    row_clipped = df.shape[0] > _MAX_ROWS
+    col_clipped = df.shape[1] > _MAX_COLS
+    truncated = row_clipped or col_clipped
     view = df.iloc[:_MAX_ROWS, :_MAX_COLS]
     payload: dict[str, Any] = {
         "type": "dataframe",
@@ -28,7 +30,14 @@ def _truncate_df(df: pd.DataFrame) -> dict[str, Any]:
     }
     if truncated:
         payload["truncated"] = True
-        payload["note"] = f"Showing first {_MAX_ROWS} rows and {_MAX_COLS} columns."
+        shown_rows = min(df.shape[0], _MAX_ROWS)
+        shown_cols = min(df.shape[1], _MAX_COLS)
+        if row_clipped and col_clipped:
+            payload["note"] = f"Showing first {shown_rows} rows and {shown_cols} columns."
+        elif row_clipped:
+            payload["note"] = f"Showing first {shown_rows} rows."
+        else:
+            payload["note"] = f"Showing first {shown_cols} columns."
     return payload
 
 

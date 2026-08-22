@@ -94,8 +94,13 @@ def _dispatch_edata_or_plot(
 ) -> dict[str, Any]:
     edata_id = _require_edata_id(edata_id, session, "edata_id is required for this operation")
     edata = load_edata(edata_id)
-    call_params = _inject_edata(fn, edata, params)
-    result = fn(**call_params) if call_params else fn(edata)
+    if namespace == "get" and function == "obs_df" and not params.get("keys") and not params.get("obsm_keys"):
+        result = edata.obs.reset_index()
+    elif namespace == "get" and function == "var_df" and not params.get("keys") and not params.get("varm_keys"):
+        result = edata.var.reset_index()
+    else:
+        call_params = _inject_edata(fn, edata, params)
+        result = fn(**call_params) if call_params else fn(edata)
     if isinstance(result, EHRData):
         record = save_edata(result, name=f"{function}-result", parent_id=edata_id)
         session.edata_id = record.edata_id

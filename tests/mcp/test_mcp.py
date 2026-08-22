@@ -19,6 +19,7 @@ from ehrapy.mcp.tools.dispatch_tools import (
     run_preprocessing,
 )
 from ehrapy.mcp.tools.ingestion import ingest_dataset
+from ehrapy.mcp.tools.inspection import summarize_edata
 from ehrapy.mcp.tools.meta import get_package_info, get_workflow_guide
 
 if TYPE_CHECKING:
@@ -76,3 +77,48 @@ def test_demo_preprocessing_and_get() -> None:
     result = json.loads(_run(run_get("obs_df", edata_id=edata_id, params={"keys": ["age"]})))
     assert result["status"] == "ok"
     assert result["result"]["type"] == "dataframe"
+
+
+def test_snapshot_includes_feature_and_obs_names() -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+    snap = json.loads(_run(get_edata_snapshot(edata_id=edata_id)))
+    assert snap["status"] == "ok"
+    assert "var_names" in snap
+    assert "obs_names" in snap
+    assert len(snap["var_names"]) > 0
+    assert "aline_flg" in snap["var_names"]
+    assert None not in snap["layers"]
+
+
+def test_run_get_without_keys_returns_annotation_table() -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+    obs_res = json.loads(_run(run_get("obs_df", edata_id=edata_id)))
+    assert obs_res["status"] == "ok"
+    assert obs_res["result"]["type"] == "dataframe"
+    assert len(obs_res["result"]["columns"]) >= 1
+    assert obs_res["result"]["columns"][0] == "index"
+
+    var_res = json.loads(_run(run_get("var_df", edata_id=edata_id)))
+    assert var_res["status"] == "ok"
+    assert var_res["result"]["type"] == "dataframe"
+    assert "index" in var_res["result"]["columns"]
+    assert len(var_res["result"]["data"]) == 46
+
+
+def test_catalog_and_help_polish() -> None:
+    help_var = json.loads(_run(get_function_help("get", "var_df")))
+    assert "variables/features" in help_var["docstring"]
+    for p in help_var["parameters"]:
+        if "annotation" in p:
+            assert "<class" not in p["annotation"]
+            assert "collections.abc" not in p["annotation"]
+
+    unknown_dt = json.loads(_run(load_demo_dataset("not_a_cohort")))
+    assert unknown_dt["status"] == "error"
+    assert unknown_dt["error_code"] == "DATASET_UNKNOWN"
+
+    summary_alias = json.loads(_run(summarize_edata()))
+    assert summary_alias["status"] == "ok" or summary_alias["error_code"] == "EDATA_ID_MISSING"
+
