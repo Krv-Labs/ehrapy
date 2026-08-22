@@ -24,7 +24,7 @@ maintainers = [
     {name = "Lukas Heumos", email = "lukas.heumos@posteo.net"},
 ]
 urls.Documentation = "https://ehrapy.readthedocs.io"
-urls.Source = "https://github.com/theislab/ehrapy"
+urls.Source = "https://github.com/Krv-Labs/ehrapy"
 urls.Home-page = "https://github.com/theislab/ehrapy"
 
 classifiers = [
