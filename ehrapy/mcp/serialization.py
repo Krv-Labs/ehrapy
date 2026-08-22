@@ -383,12 +383,14 @@ def _save_figure(fig: Any, plots_dir: Path, stem: str) -> tuple[dict[str, Any], 
     return meta, path
 
 
-def _try_save_holoviews(obj: Any, plots_dir: Path) -> tuple[dict[str, Any], Path] | None:
-    """Render a holoviews object (e.g. ep.pl.kaplan_meier's Overlay) to PNG.
+# Tried in order for holoviews PNG export. The backend is named per-call rather than set
+# via hv.extension(), which would mutate global state for every other plot in the process.
+# bokeh is the holoviews default but its PNG export needs selenium and a headless browser.
+_HOLOVIEWS_BACKENDS = ("matplotlib", "bokeh")
 
-    The matplotlib backend must be loaded and named explicitly: holoviews defaults to
-    bokeh, whose PNG export needs a headless browser and fails on a plain server install.
-    """
+
+def _try_save_holoviews(obj: Any, plots_dir: Path) -> tuple[dict[str, Any], Path] | None:
+    """Render a holoviews object (e.g. ep.pl.kaplan_meier's Overlay) to PNG."""
     try:
         import holoviews as hv
     except ImportError:
@@ -397,11 +399,32 @@ def _try_save_holoviews(obj: Any, plots_dir: Path) -> tuple[dict[str, Any], Path
     if not isinstance(obj, hv.core.dimension.Dimensioned):
         return None
 
-    hv.extension("matplotlib")
     path = _unique_plot_path(plots_dir, "holoviews")
-    hv.save(obj, str(path), fmt="png", backend="matplotlib")
-    meta = {"type": "figure", "plot_path": str(path), "media_type": "image/png"}
-    return meta, path
+    failures: list[str] = []
+    for backend in _HOLOVIEWS_BACKENDS:
+        if backend not in hv.Store.renderers:
+            continue
+        try:
+            hv.save(obj, str(path), fmt="png", backend=backend)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{backend}: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        return {
+            "type": "figure",
+            "plot_path": str(path),
+            "media_type": "image/png",
+            "render_backend": backend,
+        }, path
+
+    # Every backend failed. Report it rather than returning a success with no image.
+    if path.exists():
+        path.unlink(missing_ok=True)
+    raise ValueError(
+        "Could not export this figure to PNG with any available holoviews backend. "
+        + " | ".join(failures)
+        + ". Install the 'selenium' package to enable bokeh image export, or request a "
+        "different plot for this result."
+    )
 
 
 def _try_save_visual(obj: Any, plots_dir: Path | None) -> tuple[dict[str, Any], Path] | None:

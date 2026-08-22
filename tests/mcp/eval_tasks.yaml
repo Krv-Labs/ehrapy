@@ -185,6 +185,19 @@ tasks:
           function: umap
         assert_status: ok
         assert_image: true
+      # A plot whose first argument is a fitted model, not the EHRData (origin #5).
+      - tool: run_analysis
+        args:
+          function: positivity_check
+          params:
+            treatment: aline_flg
+            covariates: ["age", "gender_num"]
+        assert_status: ok
+      - tool: run_plot
+        args:
+          function: propensity_overlap
+        assert_status: ok
+        assert_image: true
 
   # Negative paths: a failing call must carry a specific error_code, never a generic one.
   - id: error_contracts

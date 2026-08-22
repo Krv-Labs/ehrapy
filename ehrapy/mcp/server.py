@@ -51,7 +51,7 @@ def _append_note(result: ToolResult, note: str, folded: list[str]) -> ToolResult
         struct = result.structured_content
         if isinstance(struct, dict):
             struct = {**struct, "folded_arguments": folded}
-        return _ToolResult(content=blocks, structured_content=struct)
+        return _ToolResult(content=blocks, structured_content=struct, is_error=bool(getattr(result, "is_error", False)))
     except Exception:  # noqa: BLE001
         # Never let the advisory note break an otherwise successful call.
         return result

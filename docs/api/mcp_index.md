@@ -33,6 +33,36 @@ ehrapy-mcp
 | `run_plot` | Dispatch | `readOnlyHint=True` | Render quality control, clustering, survival, or embedding figures |
 | `run_io` | Dispatch | `readOnlyHint=False` | Read and write datasets with `ehrdata.io` |
 
+## Result Status Values
+
+Every tool returns dual-channel output: a small JSON envelope in `structured_content` and
+Markdown (plus any image) in `content`. The envelope's `status` field is one of:
+
+| `status` | Meaning |
+| --- | --- |
+| `ok` | The call succeeded. |
+| `ok_empty` | The call succeeded but returned no rows/columns; `agent_action` explains how to narrow or widen the query. |
+| `ok_no_figure` | A `run_plot` call succeeded but produced no renderable figure; `agent_action` explains what to fit or check first. |
+| `error` | The call failed. `error_code` names the failure class and `agent_action` gives the next step. |
+
+Failures always carry a specific `error_code` — `UNKNOWN_FUNCTION`, `UNKNOWN_NAMESPACE`,
+`UNKNOWN_ARGUMENT`, `EDATA_ID_UNKNOWN`, `NO_ACTIVE_DATASET`, `INVALID_INPUT`,
+`INVALID_VALUE`, `DEPENDENCY_MISSING`, `FILE_NOT_FOUND`, `HOST_PATH_NOT_VISIBLE`,
+`PATH_NOT_ALLOWED`, `READ_ONLY_MODE`, and so on — never a bare generic code.
+
+### Passing function arguments
+
+Function keyword arguments belong inside `params`. If they are passed at the top level
+instead, tools that accept a `params` dict fold them in and report the fold back via
+`folded_arguments`; tools without a `params` dict reject the call with `UNKNOWN_ARGUMENT`.
+
+### Plot rendering notes
+
+Most figures render through matplotlib. A few ehrapy plots return holoviews objects; these
+are exported by trying the matplotlib backend and then bokeh. `love_plot` currently renders
+only under bokeh, whose PNG export requires the optional `selenium` package — without it the
+call returns an `error` naming the missing dependency rather than reporting a false success.
+
 ## Workflows & Prompts
 
 The MCP server provides 3 pre-built MCP Prompts for guiding agent workflows:

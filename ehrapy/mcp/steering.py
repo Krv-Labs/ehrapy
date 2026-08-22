@@ -82,14 +82,20 @@ _WORKFLOW_GRAPH: dict[tuple[str, str], list[tuple[str, str]]] = {
             "run_analysis(function='covariate_balance', params={'treatment': ..., 'covariates': [...]})",
             "Check post-weighting covariate balance (`treatment` and `covariates` are required)",
         ),
-        ("run_plot(function='love_plot')", "Render Love plot comparing unadjusted vs adjusted balance"),
+        (
+            "run_plot(function='love_plot')",
+            "Render Love plot comparing unadjusted vs adjusted balance (PNG export needs the optional `selenium` package)",
+        ),
     ],
     ("analysis", "aipw"): [
         (
             "run_analysis(function='covariate_balance', params={'treatment': ..., 'covariates': [...]})",
             "Check post-weighting covariate balance (`treatment` and `covariates` are required)",
         ),
-        ("run_plot(function='love_plot')", "Render Love plot comparing balance"),
+        (
+            "run_plot(function='love_plot')",
+            "Render Love plot comparing balance (PNG export needs the optional `selenium` package)",
+        ),
     ],
     ("analysis", "g_computation"): [
         (

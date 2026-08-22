@@ -178,3 +178,88 @@ def test_structured_content_is_always_json_serializable() -> None:
             json.dumps(res.structured_content)
 
     _run(_test())
+
+
+def test_fitter_cache_invalidates_when_the_dataset_changes() -> None:
+    """A plot must not bind a model fitted against a since-transformed cohort.
+
+    The fitter is stamped with the handle's cache mtime; a later write-through to the
+    same edata_id must make it stale rather than silently rendering a survival curve
+    for data that no longer exists.
+    """
+
+    async def _test():
+        async with Client(mcp) as client:
+            await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            await client.call_tool(
+                "run_analysis",
+                {
+                    "function": "kaplan_meier",
+                    "params": {"duration_col": "mort_day_censored", "event_col": "censor_flg"},
+                },
+            )
+            # Fitter is fresh: the plot renders.
+            assert (await client.call_tool("run_plot", {"function": "kaplan_meier"})).structured_content[
+                "status"
+            ] == "ok"
+
+            # Transform the same handle, invalidating the fitter.
+            await client.call_tool("run_preprocessing", {"function": "encode", "params": {"autodetect": True}})
+            res = await client.call_tool("run_plot", {"function": "kaplan_meier"})
+            struct = res.structured_content
+            assert struct["status"] == "error", struct
+            assert "kaplan_meier" in struct["reason"]
+
+    _run(_test())
+
+
+def test_propensity_overlap_binds_its_fitted_result() -> None:
+    """run_plot('propensity_overlap') binds the positivity_check result (origin #5)."""
+
+    async def _test():
+        async with Client(mcp) as client:
+            await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            await client.call_tool("run_preprocessing", {"function": "encode", "params": {"autodetect": True}})
+            fit = await client.call_tool(
+                "run_analysis",
+                {
+                    "function": "positivity_check",
+                    "params": {"treatment": "aline_flg", "covariates": ["age", "gender_num"]},
+                },
+            )
+            assert fit.structured_content["status"] == "ok", fit.structured_content
+            plot = await client.call_tool("run_plot", {"function": "propensity_overlap"})
+            assert plot.structured_content["status"] == "ok", plot.structured_content
+            assert any(type(c).__name__ == "ImageContent" for c in plot.content)
+
+    _run(_test())
+
+
+def test_unrenderable_figure_reports_instead_of_claiming_success() -> None:
+    """A figure no backend can export must error with a reason, not report a bare ok.
+
+    ep.pl.love_plot builds a holoviews Overlay that the matplotlib backend cannot render
+    (categorical axis) and that bokeh can only export with selenium installed.
+    """
+
+    async def _test():
+        async with Client(mcp) as client:
+            await client.call_tool("load_demo_dataset", {"dataset": "mimic_2"})
+            await client.call_tool("run_preprocessing", {"function": "encode", "params": {"autodetect": True}})
+            await client.call_tool(
+                "run_analysis",
+                {
+                    "function": "covariate_balance",
+                    "params": {"treatment": "aline_flg", "covariates": ["age", "gender_num"]},
+                },
+            )
+            res = await client.call_tool("run_plot", {"function": "love_plot"})
+            struct = res.structured_content
+            if struct["status"] == "ok":
+                # A selenium-equipped environment can render it; then it must be a real image.
+                assert any(type(c).__name__ == "ImageContent" for c in res.content)
+            else:
+                assert "selenium" in struct["reason"] or "backend" in struct["reason"]
+                assert not any(type(c).__name__ == "ImageContent" for c in res.content)
+
+    _run(_test())

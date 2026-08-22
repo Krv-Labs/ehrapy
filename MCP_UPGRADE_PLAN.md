@@ -368,6 +368,28 @@ has a regression test in `tests/mcp/test_merge_ports.py` and/or an eval step.
 5. **Middleware skipped orchestration stripping for zero-argument tools** (introduced while
    implementing the #3 hybrid, caught by an existing test).
 
+6. **The fitter cache went stale silently.** `_FITTER_CACHE` was keyed on
+   `(edata_id, function)`, but `persist_edata` writes through to the *same* handle. So
+   `kaplan_meier` → `encode` → `run_plot(kaplan_meier)` would bind the pre-transformation
+   fitter and render a survival curve for a cohort that no longer existed, reported as
+   success. Fitters are now stamped with the handle's `mtime_ns` (mirroring the
+   `edata_store` LRU) and invalidated on any write-through — the stale case degrades to the
+   "re-run the analysis" message rather than a wrong plot. The stamp is taken *after*
+   `persist_edata`, or it would invalidate itself immediately.
+7. **The `uns` fallback bound the wrong object.** `ep.tl.kaplan_meier` writes a summary
+   *DataFrame* to `uns["kaplan_meier"]`, so falling back to it reproduced the exact
+   `'DataFrame' object has no attribute 'survival_function_'` error the binding exists to
+   prevent. Bindings now declare a required attribute and validate the candidate first.
+8. **`love_plot` cannot be exported to PNG in a default install.** Its holoviews Overlay
+   fails under the matplotlib backend (categorical axis) and bokeh's PNG export needs
+   `selenium`. Rather than reporting success with no image, the server now tries each
+   registered backend and raises an error naming the missing dependency. Backends are
+   selected per call instead of via `hv.extension()`, which would mutate global state for
+   every other plot in the process.
+
+Verification status of the three #5 bindings: `kaplan_meier` renders ✓, `propensity_overlap`
+renders ✓, `love_plot` binds correctly but cannot export without `selenium` (documented).
+
 ### Eval coverage added
 
 The eval previously asserted only `status == "ok"` and contained **no plot steps and no

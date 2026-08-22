@@ -56,31 +56,62 @@ _FITTER_CACHE: collections.OrderedDict[tuple[str, str], Any] = collections.Order
 
 # Plot functions whose first parameter is a fitted model/result rather than the EHRData
 # object, mapped to the run_analysis function that produces it. Ported from origin fix #5.
-_PLOT_FITTER_SOURCES: dict[str, tuple[str, str]] = {
-    # plot function -> (analysis function that fits it, parameter name it binds to)
-    "kaplan_meier": ("kaplan_meier", "kmfs"),
-    "love_plot": ("covariate_balance", "balance"),
-    "propensity_overlap": ("positivity_check", "positivity"),
+# The third element is an attribute the bound object must expose; ep.tl.kaplan_meier also
+# writes a summary DataFrame to uns["kaplan_meier"], and binding that instead of the fitter
+# reproduces the exact AttributeError this mapping exists to prevent.
+_PLOT_FITTER_SOURCES: dict[str, tuple[str, str, str | None]] = {
+    # plot function -> (analysis function that fits it, parameter it binds to, required attr)
+    "kaplan_meier": ("kaplan_meier", "kmfs", "survival_function_"),
+    "love_plot": ("covariate_balance", "balance", None),
+    "propensity_overlap": ("positivity_check", "positivity", None),
 }
 
 
+def _usable_fitter(value: Any, required_attr: str | None) -> bool:
+    """Return True if ``value`` looks like the fitted object the plot expects."""
+    if value is None:
+        return False
+    if required_attr is None:
+        return True
+    if isinstance(value, (list, tuple)):
+        return bool(value) and all(hasattr(v, required_attr) for v in value)
+    return hasattr(value, required_attr)
+
+
+def _handle_mtime_ns(edata_id: str) -> int | None:
+    """Return the current cache mtime for a handle, or None if it is unknown."""
+    record = registry.get_dataset(edata_id)
+    return record.mtime_ns if record is not None else None
+
+
 def cache_fitter(edata_id: str, function: str, value: Any) -> None:
-    """Record a fitted model so a downstream plot call can bind it (bounded LRU)."""
+    """Record a fitted model so a downstream plot call can bind it (bounded LRU).
+
+    Stamped with the handle's cache mtime: any later write-through to the same
+    ``edata_id`` invalidates the fitter, so a plot can never silently render a model
+    fitted against a cohort that has since been transformed.
+    """
     key = (edata_id, function)
     if key in _FITTER_CACHE:
         _FITTER_CACHE.move_to_end(key)
-    _FITTER_CACHE[key] = value
+    _FITTER_CACHE[key] = (_handle_mtime_ns(edata_id), value)
     while len(_FITTER_CACHE) > _FITTER_CACHE_CAPACITY:
         _FITTER_CACHE.popitem(last=False)
 
 
 def get_fitter(edata_id: str, function: str) -> Any | None:
-    """Return a cached fitter for a handle, if one was recorded."""
+    """Return a cached fitter for a handle, or None if absent or stale."""
     key = (edata_id, function)
     if key not in _FITTER_CACHE:
         return None
+    cached_mtime, value = _FITTER_CACHE[key]
+    if cached_mtime != _handle_mtime_ns(edata_id):
+        # The dataset changed under the fitter; treat it as absent so the caller
+        # tells the agent to re-run the analysis.
+        del _FITTER_CACHE[key]
+        return None
     _FITTER_CACHE.move_to_end(key)
-    return _FITTER_CACHE[key]
+    return value
 
 
 def clear_fitter_cache() -> None:
@@ -114,15 +145,19 @@ def _build_call_params(
         return dict(params)
 
     if kind == "plot" and function in _PLOT_FITTER_SOURCES:
-        source_fn, bind_name = _PLOT_FITTER_SOURCES[function]
+        source_fn, bind_name, required_attr = _PLOT_FITTER_SOURCES[function]
         if bind_name in sig.parameters:
             fitted = get_fitter(edata_id or "", source_fn)
-            if fitted is None and hasattr(edata, "uns"):
-                fitted = edata.uns.get(source_fn)
-            if fitted is None:
+            if not _usable_fitter(fitted, required_attr) and hasattr(edata, "uns"):
+                # Fall back to a copy persisted in uns, but only if it is the fitted
+                # object rather than a summary table stored under the same key.
+                candidate = edata.uns.get(source_fn)
+                fitted = candidate if _usable_fitter(candidate, required_attr) else None
+            if not _usable_fitter(fitted, required_attr):
                 raise ValueError(
                     f"No fitted result available for plot '{function}'. "
-                    f"Run run_analysis(function='{source_fn}', ...) on this handle first."
+                    f"Run run_analysis(function='{source_fn}', ...) on this handle first "
+                    f"(re-run it if the dataset has been transformed since)."
                 )
             if bind_name == "kmfs" and not isinstance(fitted, (list, tuple)):
                 fitted = [fitted]
@@ -483,8 +518,6 @@ async def run_dispatch(
     if kind == "edata":
         try:
             res = _inject_edata(fn, edata, params, edata_id=handle, function=function, kind=kind)
-            if res is not None and function in {src for src, _ in _PLOT_FITTER_SOURCES.values()}:
-                cache_fitter(handle, function, res)
             if hasattr(res, "n_obs") and hasattr(res, "n_vars"):
                 # Function returned a modified copy
                 edata = res
@@ -510,6 +543,11 @@ async def run_dispatch(
             # Persist dataset write-through
             persist_edata(handle, edata)
             session.set_latest_edata_id(handle)
+
+            # Stamp the fitter with the post-write mtime, so it stays valid until the
+            # next transformation of this handle rather than invalidating immediately.
+            if res is not None and function in {src for src, _, _ in _PLOT_FITTER_SOURCES.values()}:
+                cache_fitter(handle, function, res)
 
             meta, content_payload = serialize_result(
                 res,
