@@ -13,7 +13,7 @@ _KNOWN_ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
 
 
 class AgnosticFastMCP(FastMCP):
-    """Strip non-schema params injected by some MCP clients."""
+    """Strip non-schema params or fold kwargs into params."""
 
     async def call_tool(
         self,
@@ -22,20 +22,34 @@ class AgnosticFastMCP(FastMCP):
         *args,
         **kwargs,
     ):
-        """Strip client-injected arguments that are not in the tool schema."""
+        """Fold function kwargs into params dict and strip client orchestration keys."""
         if arguments:
             tool = await self.get_tool(name, version=kwargs.get("version"))
             if tool is not None:
                 valid_keys = set(tool.parameters.get("properties", {}).keys())
                 unexpected = set(arguments.keys()) - valid_keys
                 if unexpected:
-                    unrecognized = unexpected - _KNOWN_ORCHESTRATION_KEYS
-                    if unrecognized:
-                        logger.warning(
-                            "Stripped unrecognized parameters from tool %s: %s",
+                    function_kwargs = {
+                        k: v for k, v in arguments.items() if k in unexpected and k not in _KNOWN_ORCHESTRATION_KEYS
+                    }
+                    if function_kwargs and "params" in valid_keys:
+                        existing_params = arguments.get("params")
+                        if not isinstance(existing_params, dict):
+                            existing_params = {}
+                        arguments["params"] = {**function_kwargs, **existing_params}
+                        logger.info(
+                            "Folded top-level kwargs %s into params for tool %s",
+                            sorted(function_kwargs.keys()),
                             name,
-                            sorted(unrecognized),
                         )
+                    else:
+                        unrecognized = unexpected - _KNOWN_ORCHESTRATION_KEYS
+                        if unrecognized:
+                            logger.warning(
+                                "Stripped unrecognized parameters from tool %s: %s",
+                                name,
+                                sorted(unrecognized),
+                            )
                 arguments = {k: v for k, v in arguments.items() if k in valid_keys}
         return await super().call_tool(name, arguments, *args, **kwargs)
 

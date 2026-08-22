@@ -9,6 +9,8 @@ fastmcp = pytest.importorskip("fastmcp")
 
 from typing import TYPE_CHECKING
 
+from ehrapy.mcp.server import mcp
+from ehrapy.mcp.session import get_session
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
 from ehrapy.mcp.tools.dispatch_tools import (
     get_edata_snapshot,
@@ -121,4 +123,44 @@ def test_catalog_and_help_polish() -> None:
 
     summary_alias = json.loads(_run(summarize_edata()))
     assert summary_alias["status"] == "ok" or summary_alias["error_code"] == "EDATA_ID_MISSING"
+
+
+def test_agnostic_fastmcp_folds_top_level_kwargs() -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+    # Call with top-level kwargs instead of inside `params`
+    result_raw = _run(
+        mcp.call_tool(
+            "run_analysis",
+            {
+                "function": "kaplan_meier",
+                "edata_id": edata_id,
+                "duration_col": "icu_los_day",
+                "event_col": "hosp_exp_flg",
+            },
+        )
+    )
+    # result_raw can be a CallToolResult object or list of contents
+    content_text = result_raw.content[0].text if hasattr(result_raw, "content") else str(result_raw)
+    result = json.loads(content_text)
+    assert result["status"] == "ok"
+    assert result["function"] == "kaplan_meier"
+
+
+def test_session_thread_safety() -> None:
+    session = get_session()
+    session.edata_id = "test-id"
+    assert session.edata_id == "test-id"
+
+    import concurrent.futures
+
+    def set_id(i: int):
+        s = get_session()
+        s.edata_id = f"id-{i}"
+        return s.edata_id
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(set_id, i) for i in range(20)]
+        results = [f.result() for f in futures]
+    assert all(r.startswith("id-") for r in results)
 
