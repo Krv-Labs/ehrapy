@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import matplotlib
-
-matplotlib.use("Agg")
-
+import matplotlib.pyplot as plt
 from ehrdata import EHRData
 
 from ehrapy.mcp.catalog import function_help, get_callable, get_namespace_kind
@@ -41,6 +40,9 @@ def _coerce_params(fn: Any, params: dict[str, Any] | None) -> dict[str, Any]:
     return coerced
 
 
+_FITTER_CACHE: dict[tuple[str, str], Any] = {}
+
+
 def _first_param_name(fn: Any) -> str | None:
     params = list(inspect.signature(fn).parameters.values())
     if not params:
@@ -48,10 +50,57 @@ def _first_param_name(fn: Any) -> str | None:
     return params[0].name
 
 
-def _inject_edata(fn: Any, edata: EHRData, params: dict[str, Any]) -> dict[str, Any]:
+def _inject_edata(
+    fn: Any,
+    edata: EHRData,
+    params: dict[str, Any],
+    *,
+    edata_id: str | None = None,
+    function: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
     first = _first_param_name(fn)
-    if first and first not in params:
-        params = {first: edata, **params}
+    if not first:
+        return params
+    if first in params:
+        return params
+
+    if first in {"edata", "adata", "data", "data_or_subcohorts"}:
+        return {first: edata, **params}
+
+    if kind == "plot":
+        if function == "kaplan_meier" or first == "kmfs":
+            fitter = _FITTER_CACHE.get((edata_id or "", "kaplan_meier"))
+            if fitter is not None:
+                params["kmfs"] = fitter if isinstance(fitter, (list, tuple, Sequence)) else [fitter]
+                return params
+            if "duration_col" in params:
+                dur = params.pop("duration_col")
+                evt = params.pop("event_col", None)
+                import ehrapy as ep
+
+                kmf = ep.tools.kaplan_meier(edata, dur, evt)
+                if edata_id:
+                    _FITTER_CACHE[(edata_id, "kaplan_meier")] = kmf
+                params["kmfs"] = [kmf]
+                return params
+            raise ValueError(
+                "No fitted KaplanMeierFitter found. Run run_analysis('kaplan_meier', ...) first "
+                "or provide duration_col and event_col."
+            )
+        if function == "love_plot" or first == "balance":
+            bal = _FITTER_CACHE.get((edata_id or "", "covariate_balance")) or edata.uns.get("covariate_balance")
+            if bal is not None:
+                params["balance"] = bal
+                return params
+            raise ValueError("No covariate balance DataFrame found. Run run_analysis('covariate_balance', ...) first.")
+        if function == "propensity_overlap" or first == "positivity":
+            pos = _FITTER_CACHE.get((edata_id or "", "positivity_check")) or edata.uns.get("positivity_check")
+            if pos is not None:
+                params["positivity"] = pos
+                return params
+            raise ValueError("No positivity check result found. Run run_analysis('positivity_check', ...) first.")
+
     return params
 
 
@@ -94,29 +143,49 @@ def _dispatch_edata_or_plot(
 ) -> dict[str, Any]:
     edata_id = _require_edata_id(edata_id, session, "edata_id is required for this operation")
     edata = load_edata(edata_id)
+
     if namespace == "get" and function == "obs_df" and not params.get("keys") and not params.get("obsm_keys"):
         result = edata.obs.reset_index()
     elif namespace == "get" and function == "var_df" and not params.get("keys") and not params.get("varm_keys"):
         result = edata.var.reset_index()
     else:
-        call_params = _inject_edata(fn, edata, params)
+        if kind == "plot":
+            sig = inspect.signature(fn)
+            if "return_fig" in sig.parameters and "return_fig" not in params:
+                params["return_fig"] = True
+            if "show" in sig.parameters and "show" not in params:
+                params["show"] = False
+
+        call_params = _inject_edata(fn, edata, params, edata_id=edata_id, function=function, kind=kind)
         result = fn(**call_params) if call_params else fn(edata)
+
+        if kind == "plot" and result is None and plt.get_fignums():
+            result = plt.gcf()
     if isinstance(result, EHRData):
         record = save_edata(result, name=f"{function}-result", parent_id=edata_id)
         session.edata_id = record.edata_id
         return _ok(
             namespace,
             function,
-            serialize_result(result, plots_dir=plots_dir),
+            serialize_result(result, plots_dir=plots_dir, stem=function),
             edata_id=record.edata_id,
         )
+
+    if result is not None:
+        _FITTER_CACHE[(edata_id, function)] = result
+
     if in_place and kind == "edata":
         persist_edata(edata_id, edata)
     session.edata_id = edata_id
+
+    serialized = serialize_result(result, plots_dir=plots_dir if kind == "plot" else None, stem=function)
+    if kind == "plot":
+        plt.close("all")
+
     return _ok(
         namespace,
         function,
-        serialize_result(result, plots_dir=plots_dir if kind == "plot" else None),
+        serialized,
         edata_id=edata_id,
     )
 

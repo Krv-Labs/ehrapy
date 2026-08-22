@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -76,35 +77,42 @@ def _unique_plot_path(plots_dir: Path, stem: str) -> Path:
 def _save_figure(fig: Any, plots_dir: Path, stem: str) -> dict[str, Any]:
     path = _unique_plot_path(plots_dir, stem)
     fig.savefig(path, bbox_inches="tight", dpi=120)
-    return {"type": "figure", "path": str(path), "media_type": "image/png"}
+    with path.open("rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+    return {
+        "type": "figure",
+        "function": stem,
+        "path": str(path),
+        "media_type": "image/png",
+        "image_base64": img_b64,
+    }
 
 
-def _try_save_holoviews(obj: Any, plots_dir: Path) -> dict[str, Any] | None:
+def _try_save_holoviews(obj: Any, plots_dir: Path, stem: str = "plot") -> dict[str, Any] | None:
     try:
         import holoviews as hv
 
         if isinstance(obj, hv.core.dimension.Dimensioned):
-            path = _unique_plot_path(plots_dir, "holoviews")
-            hv.save(obj, str(path), fmt="png")
-            return {"type": "figure", "path": str(path), "media_type": "image/png"}
+            fig = hv.render(obj, backend="matplotlib")
+            return _save_figure(fig, plots_dir, stem=stem)
     except Exception:  # noqa: BLE001
         return None
     return None
 
 
-def _try_save_figure(obj: Any, plots_dir: Path | None) -> dict[str, Any] | None:
+def _try_save_figure(obj: Any, plots_dir: Path | None, stem: str = "plot") -> dict[str, Any] | None:
     if plots_dir is None:
         return None
     fig = getattr(obj, "figure", None)
     if fig is not None:
-        return _save_figure(fig, plots_dir, stem=type(obj).__name__)
+        return _save_figure(fig, plots_dir, stem=stem)
     if type(obj).__module__.startswith("matplotlib"):
-        return _save_figure(obj, plots_dir, stem="matplotlib")
-    return _try_save_holoviews(obj, plots_dir)
+        return _save_figure(obj, plots_dir, stem=stem)
+    return _try_save_holoviews(obj, plots_dir, stem=stem)
 
 
-def _serialize_visual_or_repr(obj: Any, plots_dir: Path | None) -> Any:
-    saved = _try_save_figure(obj, plots_dir)
+def _serialize_visual_or_repr(obj: Any, plots_dir: Path | None, stem: str = "plot") -> Any:
+    saved = _try_save_figure(obj, plots_dir, stem=stem)
     if saved is not None:
         return saved
     summary = getattr(obj, "summary", None)
@@ -116,7 +124,7 @@ def _serialize_visual_or_repr(obj: Any, plots_dir: Path | None) -> Any:
     return {"type": type(obj).__name__, "repr": repr(obj)[:2000]}
 
 
-def _serialize_object(obj: Any, *, plots_dir: Path | None = None) -> Any:
+def _serialize_object(obj: Any, *, plots_dir: Path | None = None, stem: str = "plot") -> Any:
     if _is_scalar(obj):
         return _serialize_scalar(obj)
     if isinstance(obj, (EHRData, pd.DataFrame, pd.Series, np.ndarray)):
@@ -124,12 +132,12 @@ def _serialize_object(obj: Any, *, plots_dir: Path | None = None) -> Any:
     if is_dataclass(obj) and not isinstance(obj, type):
         return {"type": type(obj).__name__, **asdict(obj)}
     if isinstance(obj, dict):
-        return {str(k): _serialize_object(v, plots_dir=plots_dir) for k, v in obj.items()}
+        return {str(k): _serialize_object(v, plots_dir=plots_dir, stem=stem) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_serialize_object(v, plots_dir=plots_dir) for v in obj]
-    return _serialize_visual_or_repr(obj, plots_dir)
+        return [_serialize_object(v, plots_dir=plots_dir, stem=stem) for v in obj]
+    return _serialize_visual_or_repr(obj, plots_dir, stem=stem)
 
 
-def serialize_result(result: Any, *, plots_dir: Path | None = None) -> Any:
+def serialize_result(result: Any, *, plots_dir: Path | None = None, stem: str = "plot") -> Any:
     """Convert an ehrapy return value into a JSON-friendly payload."""
-    return _serialize_object(result, plots_dir=plots_dir)
+    return _serialize_object(result, plots_dir=plots_dir, stem=stem)

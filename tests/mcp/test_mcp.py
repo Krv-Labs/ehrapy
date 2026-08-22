@@ -17,7 +17,9 @@ from ehrapy.mcp.tools.dispatch_tools import (
     get_function_help,
     list_ehrapy_functions,
     load_demo_dataset,
+    run_analysis,
     run_get,
+    run_plot,
     run_preprocessing,
 )
 from ehrapy.mcp.tools.ingestion import ingest_dataset
@@ -163,4 +165,44 @@ def test_session_thread_safety() -> None:
         futures = [executor.submit(set_id, i) for i in range(20)]
         results = [f.result() for f in futures]
     assert all(r.startswith("id-") for r in results)
+
+
+def test_plot_returns_figure_with_named_artifact_and_base64() -> None:
+    loaded = json.loads(_run(load_demo_dataset("ehrdata_blobs")))
+    edata_id = loaded["edata_id"]
+    _run(run_preprocessing("pca", edata_id=edata_id))
+
+    # Test run_plot without return_fig
+    plot_res = json.loads(_run(run_plot("pca", edata_id=edata_id)))
+    assert plot_res["status"] == "ok"
+    assert plot_res["result"] is not None
+    assert plot_res["result"]["type"] == "figure"
+    assert "pca" in plot_res["result"]["path"]
+    assert "Figure.png" not in plot_res["result"]["path"]
+    assert "Axes.png" not in plot_res["result"]["path"]
+    assert plot_res["result"]["function"] == "pca"
+    assert plot_res["result"]["media_type"] == "image/png"
+    assert len(plot_res["result"]["image_base64"]) > 100
+
+
+def test_kaplan_meier_analysis_and_plot() -> None:
+    loaded = json.loads(_run(load_demo_dataset("mimic_2")))
+    edata_id = loaded["edata_id"]
+    km_res = json.loads(
+        _run(
+            run_analysis(
+                "kaplan_meier",
+                edata_id=edata_id,
+                params={"duration_col": "icu_los_day", "event_col": "hosp_exp_flg"},
+            )
+        )
+    )
+    assert km_res["status"] == "ok"
+
+    # Now plot it using cached fitter
+    plot_res = json.loads(_run(run_plot("kaplan_meier", edata_id=edata_id)))
+    assert plot_res["status"] == "ok"
+    assert plot_res["result"]["type"] == "figure"
+    assert "kaplan_meier" in plot_res["result"]["path"]
+    assert len(plot_res["result"]["image_base64"]) > 100
 
