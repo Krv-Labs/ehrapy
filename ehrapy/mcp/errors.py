@@ -1,9 +1,10 @@
-"""Structured MCP error envelopes."""
+"""Structured MCP error envelopes with dual-channel (JSON + Markdown) output."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from fastmcp.tools.tool import ToolResult
 
 _SANDBOX_PATH_PREFIXES = (
     "/home/claude",
@@ -14,6 +15,15 @@ _SANDBOX_PATH_PREFIXES = (
 )
 
 
+def format_error_markdown(reason: str, *, error_code: str | None = None, agent_action: str | None = None) -> str:
+    """Render a clean 2-line Markdown block for error results."""
+    title = f"# Error: {error_code}" if error_code else "# Error"
+    lines = [title, "", reason]
+    if agent_action:
+        lines.extend(["", f"**Action:** {agent_action}"])
+    return "\n".join(lines)
+
+
 def mcp_error(
     tool: str,
     reason: str,
@@ -22,20 +32,26 @@ def mcp_error(
     agent_action: str | None = None,
     details: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
-) -> str:
-    """Return a JSON error envelope for MCP tools."""
-    return json.dumps(
-        {
-            "status": "error",
-            "tool": tool,
-            "reason": reason,
-            "error_code": error_code,
-            "agent_action": agent_action,
-            "details": details or {},
-            "metrics": metrics or {},
-        },
-        indent=2,
-    )
+    is_error: bool = False,
+) -> ToolResult:
+    """Return a dual-channel error ToolResult."""
+    # Truncate reason at 300 chars to avoid leaking huge internal tracebacks
+    clean_reason = reason[:300] if len(reason) > 300 else reason
+    struct: dict[str, Any] = {
+        "status": "error",
+        "tool": tool,
+        "reason": clean_reason,
+        "error_code": error_code or "EXECUTION_ERROR",
+    }
+    if agent_action:
+        struct["agent_action"] = agent_action
+    if details:
+        struct["details"] = details
+    if metrics:
+        struct["metrics"] = metrics
+
+    md = format_error_markdown(clean_reason, error_code=error_code, agent_action=agent_action)
+    return ToolResult(content=md, structured_content=struct, is_error=is_error)
 
 
 def classify_path(path: str) -> dict[str, Any]:
@@ -57,10 +73,10 @@ def path_access_error(
     *,
     missing_code: str = "FILE_NOT_FOUND",
     missing_reason: str = "Path does not exist on the MCP host filesystem.",
-    missing_action: str = ("Provide a host-visible absolute path, or call get_runtime_context first."),
+    missing_action: str = "Provide a host-visible absolute path, or call get_runtime_context first.",
     sandbox_action: str | None = None,
-) -> str:
-    """Return a path-access error envelope."""
+) -> ToolResult:
+    """Return a path-access error ToolResult."""
     path_context = classify_path(path)
     if path_context["looks_like_sandbox_path"]:
         return mcp_error(
@@ -68,7 +84,7 @@ def path_access_error(
             "Path is not visible to the MCP server host filesystem.",
             error_code="HOST_PATH_NOT_VISIBLE",
             agent_action=sandbox_action
-            or ("Ask the user for a host-visible absolute path, or call get_runtime_context first."),
+            or "Ask the user for a host-visible absolute path, or call get_runtime_context first.",
             details={"path_context": path_context},
         )
 
@@ -81,12 +97,28 @@ def path_access_error(
     )
 
 
-def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> str:
-    """Return an unknown-handle error envelope."""
+def unknown_handle_error(tool: str, handle_name: str, handle_value: str) -> ToolResult:
+    """Return an unknown-handle error ToolResult."""
     return mcp_error(
         tool,
         f"Unknown {handle_name} '{handle_value}'.",
         error_code=f"{handle_name.upper()}_UNKNOWN",
-        agent_action=(f"Create or retrieve a valid {handle_name} before retrying this tool."),
+        agent_action=f"Create or retrieve a valid {handle_name} (e.g. via load_demo_dataset or ingest_dataset) before retrying.",
         details={handle_name: handle_value},
+    )
+
+
+def unknown_argument_error(tool: str, extra_keys: set[str], valid_keys: set[str]) -> ToolResult:
+    """Return UNKNOWN_ARGUMENT error ToolResult."""
+    extra_str = ", ".join(sorted(extra_keys))
+    valid_str = ", ".join(sorted(valid_keys))
+    return mcp_error(
+        tool,
+        f"Unknown argument(s): {extra_str}. Valid arguments for {tool}: {valid_str}.",
+        error_code="UNKNOWN_ARGUMENT",
+        agent_action="Rename the argument and retry. Function kwargs go inside `params`.",
+        details={
+            "unknown_arguments": sorted(extra_keys),
+            "valid_arguments": sorted(valid_keys),
+        },
     )

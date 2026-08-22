@@ -1,58 +1,59 @@
-"""Agent-facing workflow guidance."""
+"""Workflow guides, system prompts, and MCP prompt templates for ehrapy."""
 
-WORKFLOW_PROMPT = """# ehrapy MCP workflow (v0)
+from __future__ import annotations
 
-Call `get_runtime_context` before file operations and `get_package_info` for the full API map.
+WORKFLOW_PROMPT = """# ehrapy MCP Server — Agent Guide
 
-## Namespaces → MCP tools
+## Core Principles
+1. **Handle-Based Cohort State:** Datasets are tracked by string identifiers (`edata_id`). Tools implicitly default to the most recently created or modified handle (`used_latest: true`), but explicitly passing `edata_id` is recommended for multi-cohort workflows.
+2. **Dual-Channel Output:** Tools return structured metadata in `structured_content` (status, edata_id, dimensions, suggested_next) and formatted Markdown/tables/images in `content`.
+3. **Smart Serialization:** Tabular results default to concise column profiles with information ranking. Set `response_format='detailed'` only when you specifically need sample rows.
+4. **Non-Destructive Branching:** Use `fork_edata_handle` to preserve intermediate cohort states before irreversible transformations.
 
-| ehrapy module | MCP tool | Functions |
-|---------------|----------|-----------|
-| `ep.pp.*` | `run_preprocessing` | QC, encode, impute, normalize, filter, PCA, neighbors |
-| `ep.tl.*` | `run_analysis` | survival, causal, embedding, leiden, feature ranking |
-| `ep.get.*` | `run_get` | obs_df, var_df, rank_features_groups_df |
-| `ep.pl.*` | `run_plot` | all plots → PNG in cache |
-| `ehrdata.io.*` | `run_io` | read/write h5ed, csv, zarr, pandas |
-| `ehrdata.dt.*` | `load_demo_dataset` | mimic_2, physionet2012, … |
+## Tool Namespaces
+- `preprocessing` (`ep.pp.*`): Quality control (`qc_metrics`), encoding (`encode`), imputation (`knn_impute`, `miss_forest_impute`), normalization (`scale`, `minmax_scale`), PCA (`pca`), neighbor graph (`neighbors`).
+- `analysis` (`ep.tl.*`): Survival analysis (`kaplan_meier`, `cox_ph`), causal inference (`iptw`, `aipw`, `g_computation`), embeddings (`umap`, `tsne`), clustering (`leiden`), differential feature ranking (`rank_features_groups`).
+- `get` (`ep.get.*`): Read-only data extraction (`obs_df`, `var_df`, `rank_features_groups_df`).
+- `plot` (`ep.plot.*`): Visualizations returning PNG image artifacts and file paths.
+- `io` (`ehrdata.io.*`): Loading and saving files from/to disk (`read_csv`, `read_h5ed`, `to_pandas`).
+- `demo` (`ehrdata.dt.*`): Built-in demonstration datasets (`mimic_2`, `physionet2012`).
 
-Discovery: `list_ehrapy_functions`, `get_function_help(namespace, function)`.
+## Standard Workflow Sequences
 
-## Typical flows
+### 1. Exploratory Data Analysis & Quality Control
+1. `load_demo_dataset(dataset='mimic_2')` or `ingest_dataset(file_path=...)`
+2. `get_edata_snapshot()` → Inspect variables, observations, layers
+3. `run_preprocessing(function='qc_metrics')` → Missingness and quality metrics
+4. `run_plot(function='missing_values_matrix')` → Visualize missingness patterns
 
-### Exploration
-1. `load_demo_dataset("mimic_2")` or `ingest_dataset(path)`
-2. `get_edata_snapshot`
-3. `run_preprocessing("qc_metrics", params={...})`
-4. `run_preprocessing("encode")`
-5. `run_plot("missing_values_matrix")`
+### 2. Dimension Reduction & Subtyping
+1. `run_preprocessing(function='encode')` → Encode categorical features
+2. `run_preprocessing(function='knn_impute')` → Impute missing numerical values
+3. `run_preprocessing(function='pca')` → Principal component analysis
+4. `run_preprocessing(function='neighbors')` → Compute neighborhood graph
+5. `run_analysis(function='umap')` → Generate UMAP coordinates
+6. `run_analysis(function='leiden')` → Cluster patients into sub-phenotypes
+7. `run_plot(function='umap', params={'color': 'leiden'})` → Visualize patient clusters
+8. `run_analysis(function='rank_features_groups', params={'groupby': 'leiden'})` → Differentiating features
+9. `run_get(function='rank_features_groups_df')` → Tabular differential features
 
-### Clustering
-1. `run_preprocessing("highly_variable_features")`
-2. `run_preprocessing("pca")`
-3. `run_preprocessing("neighbors")`
-4. `run_analysis("umap")`
-5. `run_analysis("leiden")`
-6. `run_analysis("rank_features_groups", params={"groupby": "leiden"})`
-7. `run_get("rank_features_groups_df", params={"groupby": "leiden"})`
+### 3. Survival Analysis
+1. `run_analysis(function='kaplan_meier', params={'duration_col': 'mort_day_censored', 'event_col': 'censor_flg', 'groupby': 'service_unit'})`
+2. `run_plot(function='kaplan_meier')` → Survival curve plots
+3. `run_analysis(function='cox_ph', params={'duration_col': 'mort_day_censored', 'event_col': 'censor_flg', 'covariates': ['age', 'gender_num']})`
+4. `run_plot(function='cox_ph_forestplot')` → Hazard ratios forest plot
 
-### Survival
-1. `run_analysis("stratified_table_one", params={...})`
-2. `run_analysis("kaplan_meier", params={...})`
-3. `run_analysis("cox_ph", params={...})`
-4. `run_plot("cox_ph_forestplot", params={...})`
+### 4. Causal Inference
+1. `run_analysis(function='iptw', params={'treatment': 'aline_flg', 'outcome': 'hosp_exp_flg', 'covariates': ['age', 'gender_num', 'weight_first']})`
+2. `run_analysis(function='covariate_balance')` → Assess balance
+3. `run_plot(function='love_plot')` → Render Love plot
 
-### Causal
-1. `run_analysis("positivity_check", params={...})`
-2. `run_analysis("covariate_balance", params={...})`
-3. `run_analysis("iptw", params={...})`  (or aipw, g_computation, t_learner, …)
-4. `run_plot("love_plot", params={...})`
+## Host vs. Sandbox Filesystem Paths
+All file paths passed to `ingest_dataset` or `export_edata` must refer to absolute, host-visible paths. Sandboxed agent paths (e.g. `/workspace`, `/home/claude`) are not accessible directly to the MCP host.
+"""
 
-## Handles
-- `edata_id` — cached EHRData on the MCP host (h5ed in cache_dir)
-- `fork_edata_handle` before destructive edits
-- `export_edata` to write results to a user path
-
-## Params
-Pass function kwargs as a JSON `params` dict. Lists become tuples when needed.
-Most preprocessing/analysis mutates EHRData in place; set `in_place=false` to skip persist.
+SERVER_INSTRUCTIONS = """ehrapy MCP server provides clinical data analysis tools built on ehrapy and ehrdata.
+Operate on clinical cohorts (MIMIC-II, PhysioNet, or custom tabular files) using handle-based EHRData objects.
+Always check get_function_help for required parameters before calling unfamiliar preprocessing or analysis functions.
+Results are returned with dual-channel structured metadata and compact Markdown tables.
 """

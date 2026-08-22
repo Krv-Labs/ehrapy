@@ -1,46 +1,59 @@
+"""Meta, runtime, and workflow guide tools for ehrapy MCP."""
+
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import sys
+from typing import Any
+
+from fastmcp.tools.tool import ToolResult
+
 import ehrapy as ep
-from fastmcp import Context
-from ehrapy.mcp.catalog import catalog_summary
+from ehrapy.mcp.policy import get_allowed_roots, is_read_only_mode
 from ehrapy.mcp.prompts import WORKFLOW_PROMPT
 from ehrapy.mcp.registry import registry
 from ehrapy.mcp.session import get_session
 
 
-async def get_workflow_guide(ctx: Context = None) -> str:
-    """Recommended ehrapy MCP workflow and namespace map. Call once at session start."""
-    return WORKFLOW_PROMPT
+def get_workflow_guide() -> ToolResult:
+    """Return recommended multi-step clinical analysis workflows covering quality control, survival analysis, and causal inference.
+
+    Use this to determine the standard sequence of ehrapy operations before processing a cohort.
+    """
+    struct = {"status": "ok", "guide": "Standard clinical workflow guide"}
+    return ToolResult(structured_content=struct, content=WORKFLOW_PROMPT)
 
 
-async def get_runtime_context(ctx: Context = None) -> str:
-    """MCP host runtime: cwd, cache_dir, session edata_id, registered datasets."""
-    session = get_session(ctx)
-    datasets = [
-        {"edata_id": r.edata_id, "name": r.name, "n_obs": r.n_obs, "n_vars": r.n_vars} for r in registry.list_datasets()
-    ]
-    payload = {
+def get_runtime_context() -> ToolResult:
+    """Return MCP runtime environment details including ehrapy version, cache directories, and session handle.
+
+    Use this to verify environment state and identify active dataset identifiers.
+    """
+    session = get_session()
+    allowed = get_allowed_roots()
+    datasets = registry.list_datasets()
+
+    struct: dict[str, Any] = {
         "status": "ok",
-        "cwd": str(Path.cwd()),
+        "ehrapy_version": ep.__version__,
+        "python_version": sys.version.split()[0],
         "cache_dir": str(registry.cache_dir()),
         "plots_dir": str(registry.plots_dir()),
-        "latest_edata_id": session.edata_id,
-        "registered_datasets": datasets[-20:],
-        "ehrapy_version": ep.__version__,
+        "active_edata_id": session.get_latest_edata_id(),
+        "read_only_mode": is_read_only_mode(),
+        "allowed_roots": [str(r) for r in allowed] if allowed else None,
+        "cached_datasets_count": len(datasets),
     }
-    return json.dumps(payload, indent=2)
 
+    md_lines = [
+        "### ehrapy MCP Runtime Context",
+        f"- **ehrapy version:** `{ep.__version__}`",
+        f"- **Python version:** `{sys.version.split()[0]}`",
+        f"- **Active dataset (edata_id):** `{session.get_latest_edata_id() or 'None'}`",
+        f"- **Cached datasets:** {len(datasets)}",
+        f"- **Cache directory:** `{registry.cache_dir()}`",
+        f"- **Plots directory:** `{registry.plots_dir()}`",
+        f"- **Read-only mode:** `{is_read_only_mode()}`",
+        f"- **Allowed roots:** `{', '.join(str(r) for r in allowed) if allowed else 'Unrestricted'}`",
+    ]
 
-async def get_package_info(ctx: Context = None) -> str:
-    """Ehrapy version and dispatch namespace summary."""
-    summary = catalog_summary()
-    totals = {ns: spec["count"] for ns, spec in summary.items()}
-    payload = {
-        "status": "ok",
-        "ehrapy_version": ep.__version__,
-        "dispatch_namespaces": summary,
-        "total_functions": sum(totals.values()),
-    }
-    return json.dumps(payload, indent=2)
+    return ToolResult(structured_content=struct, content="\n".join(md_lines))

@@ -1,232 +1,286 @@
+"""Dispatch, inspection, demo, and help tools for ehrapy MCP."""
+
 from __future__ import annotations
 
-import dataclasses
-import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from fastmcp import Context
+from fastmcp.tools.tool import ToolResult
 
-from ehrapy.mcp.catalog import catalog_summary, list_functions, list_namespaces
-from ehrapy.mcp.dispatch import dispatch_json, help_json
+from ehrapy.mcp.catalog import (
+    function_help,
+    function_help_markdown,
+    list_functions,
+    list_namespaces,
+)
+from ehrapy.mcp.dispatch import run_dispatch
 from ehrapy.mcp.edata_store import fork_edata, load_edata
 from ehrapy.mcp.errors import mcp_error, unknown_handle_error
 from ehrapy.mcp.session import get_session
+from ehrapy.mcp.steering import get_suggested_next
+
+from fastmcp import Context  # noqa: TC002
 
 
-async def list_ehrapy_functions(
-    namespace: str | None = None,
-    ctx: Context = None,
-) -> str:
-    """List dispatchable ehrapy functions. Omit namespace for full catalog."""
-    try:
-        if namespace is None:
-            return json.dumps(catalog_summary(), indent=2)
-        return json.dumps(
-            {"namespace": namespace, "functions": list_functions(namespace)},
-            indent=2,
+async def load_demo_dataset(dataset: str) -> ToolResult:
+    """Load a built-in demonstration cohort into the MCP session.
+
+    Use 'mimic_2' for ICU mortality and survival workflows, or 'physionet2012' for in-hospital mortality benchmarking.
+    Returns a dataset handle (edata_id) for subsequent tool calls.
+    """
+    return await run_dispatch("demo", dataset)
+
+
+def fork_edata_handle(edata_id: str | None = None, name: str | None = None) -> ToolResult:
+    """Create an independent copy of an existing EHRData dataset handle.
+
+    Use this to branch analysis pipelines or preserve intermediate states before destructive transformations.
+    """
+    session = get_session()
+    used_latest = False
+    handle = edata_id
+    if handle is None:
+        handle = session.get_latest_edata_id()
+        used_latest = True
+
+    if handle is None:
+        return mcp_error(
+            "fork_edata_handle",
+            "No dataset handle provided and no active dataset in session.",
+            error_code="NO_ACTIVE_DATASET",
+            agent_action="Load a dataset with load_demo_dataset(dataset='mimic_2') first.",
         )
+
+    try:
+        record = fork_edata(handle, name=name)
+        session.set_latest_edata_id(record.edata_id)
+        struct: dict[str, Any] = {
+            "status": "ok",
+            "edata_id": record.edata_id,
+            "parent_id": record.parent_id,
+            "name": record.name,
+            "n_obs": record.n_obs,
+            "n_vars": record.n_vars,
+        }
+        if used_latest:
+            struct["used_latest"] = True
+
+        md = (
+            f"### Forked EHRData handle\n"
+            f"- **New handle (edata_id):** `{record.edata_id}`\n"
+            f"- **Parent handle:** `{record.parent_id}`\n"
+            f"- **Name:** `{record.name}`\n"
+            f"- **Observations:** {record.n_obs}\n"
+            f"- **Variables:** {record.n_vars}"
+        )
+        return ToolResult(structured_content=struct, content=md)
+    except (KeyError, FileNotFoundError):
+        return unknown_handle_error("fork_edata_handle", "edata_id", handle)
+    except Exception as exc:  # noqa: BLE001
+        return mcp_error("fork_edata_handle", f"Failed to fork handle '{handle}': {exc}", error_code="FORK_ERROR")
+
+
+def get_edata_snapshot(edata_id: str | None = None) -> ToolResult:
+    """Return structural metadata for an EHRData handle including observation count, variable count, layers, obs columns, and uns keys.
+
+    Read-only summary of dataset dimensions.
+    """
+    session = get_session()
+    handle = edata_id or session.get_latest_edata_id()
+    if handle is None:
+        return mcp_error(
+            "get_edata_snapshot",
+            "No dataset handle provided and no active dataset in session.",
+            error_code="NO_ACTIVE_DATASET",
+            agent_action="Load a dataset with load_demo_dataset(dataset='mimic_2') or ingest_dataset(file_path=...).",
+        )
+
+    try:
+        edata = load_edata(handle)
+        obs_cols = [str(c) for c in edata.obs.columns if c is not None]
+        var_cols = [str(c) for c in edata.var.columns if c is not None]
+        layers = [str(k) for k in edata.layers.keys() if k is not None]
+        uns_keys = [str(k) for k in edata.uns.keys() if k is not None]
+
+        struct = {
+            "status": "ok",
+            "edata_id": handle,
+            "n_obs": edata.n_obs,
+            "n_vars": edata.n_vars,
+            "obs_columns": obs_cols,
+            "var_columns": var_cols,
+            "layers": layers,
+            "uns_keys": uns_keys,
+        }
+        if edata_id is None:
+            struct["used_latest"] = True
+
+        md_lines = [
+            f"### Snapshot for EHRData `{handle}`",
+            f"- **Dimensions:** {edata.n_obs} observations × {edata.n_vars} variables",
+            f"- **Observation columns ({len(obs_cols)}):** {', '.join(obs_cols[:25])}{'...' if len(obs_cols) > 25 else ''}",
+            f"- **Variable columns ({len(var_cols)}):** {', '.join(var_cols[:25])}{'...' if len(var_cols) > 25 else ''}",
+            f"- **Layers ({len(layers)}):** {', '.join(layers) if layers else 'None'}",
+            f"- **Annotations (uns keys):** {', '.join(uns_keys) if uns_keys else 'None'}",
+        ]
+        return ToolResult(structured_content=struct, content="\n".join(md_lines))
+    except (KeyError, FileNotFoundError):
+        return unknown_handle_error("get_edata_snapshot", "edata_id", handle)
+    except Exception as exc:  # noqa: BLE001
+        return mcp_error("get_edata_snapshot", f"Snapshot failed: {exc}", error_code="SNAPSHOT_ERROR")
+
+
+def list_ehrapy_functions(namespace: str) -> ToolResult:
+    """List available functions within a specified ehrapy dispatch namespace.
+
+    Use this to discover supported operations in preprocessing, analysis, get, plot, io, or demo namespaces.
+    """
+    try:
+        funcs = list_functions(namespace)
+        struct = {"status": "ok", "namespace": namespace, "count": len(funcs), "functions": funcs}
+        md = f"### Available functions in `{namespace}` ({len(funcs)})\n\n" + ", ".join(f"`{f}`" for f in funcs)
+        return ToolResult(structured_content=struct, content=md)
     except KeyError:
+        valid = list_namespaces()
         return mcp_error(
             "list_ehrapy_functions",
-            f"Unknown namespace '{namespace}'.",
-            error_code="NAMESPACE_UNKNOWN",
-            agent_action=f"Use one of: {', '.join(list_namespaces())}",
+            f"Unknown namespace '{namespace}'. Valid namespaces: {', '.join(valid)}.",
+            error_code="UNKNOWN_NAMESPACE",
+            agent_action=f"Specify one of the valid namespaces: {', '.join(valid)}.",
         )
-    except Exception as exc:  # noqa: BLE001
-        return mcp_error("list_ehrapy_functions", str(exc))
 
 
-async def get_function_help(
-    namespace: str,
-    function: str,
-    ctx: Context = None,
-) -> str:
-    """Return signature and docstring for a namespaced ehrapy function."""
+def get_function_help(namespace: str, function: str) -> ToolResult:
+    """Retrieve signature, parameter descriptions, accepted values, and an example call for any ehrapy function.
+
+    Use this when unsure which arguments a function accepts before calling run_preprocessing, run_analysis, or run_get.
+    """
     try:
-        return help_json(namespace, function)
+        info = function_help(namespace, function)
+        md = function_help_markdown(namespace, function)
+        struct = {
+            "status": "ok",
+            "namespace": info["namespace"],
+            "function": info["function"],
+            "kind": info["kind"],
+            "parameters": info["parameters"],
+            "example_call": info["example_call"],
+        }
+        return ToolResult(structured_content=struct, content=md)
     except KeyError as exc:
         return mcp_error(
             "get_function_help",
             str(exc),
-            error_code="FUNCTION_UNKNOWN",
-            agent_action="Call list_ehrapy_functions to discover valid names.",
+            error_code="UNKNOWN_FUNCTION",
+            agent_action=f"Call list_ehrapy_functions(namespace='{namespace}') to see available functions.",
         )
     except Exception as exc:  # noqa: BLE001
-        return mcp_error("get_function_help", str(exc))
-
-
-async def _run_namespace(
-    tool: str,
-    namespace: str,
-    function: str,
-    edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
-    in_place: bool = True,
-    ctx: Context = None,
-) -> str:
-    try:
-        return dispatch_json(
-            namespace,
-            function,
-            edata_id=edata_id,
-            params=params,
-            ctx=ctx,
-            in_place=in_place,
-        )
-    except KeyError as exc:
-        return mcp_error(
-            tool,
-            str(exc),
-            error_code="FUNCTION_UNKNOWN",
-            agent_action="Call list_ehrapy_functions or get_function_help.",
-        )
-    except ValueError as exc:
-        return mcp_error(tool, str(exc), error_code="INVALID_INPUT")
-    except Exception as exc:  # noqa: BLE001
-        return mcp_error(tool, str(exc))
+        return mcp_error("get_function_help", f"Failed to retrieve help: {exc}", error_code="HELP_ERROR")
 
 
 async def run_preprocessing(
     function: str,
     edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
-    in_place: bool = True,
+    params: dict | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
     ctx: Context = None,
-) -> str:
-    """Run an ep.preprocessing (ep.pp.*) function. Mutates EHRData in place by default."""
-    return await _run_namespace("run_preprocessing", "preprocessing", function, edata_id, params, in_place, ctx)
+) -> ToolResult:
+    """Run an ehrapy preprocessing function (ep.pp.*) on an EHRData object.
+
+    Use this for quality control, encoding, imputation, normalization, filtering, PCA, and neighbor graph computation.
+    Updates the dataset in place and returns a column profile of the result.
+    Set response_format='detailed' only when you explicitly need sample rows.
+    """
+    return await run_dispatch(
+        "preprocessing",
+        function,
+        edata_id=edata_id,
+        params=params,
+        response_format=response_format,
+        ctx=ctx,
+    )
 
 
 async def run_analysis(
     function: str,
     edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
-    in_place: bool = True,
+    params: dict | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
     ctx: Context = None,
-) -> str:
-    """Run an ep.tools (ep.tl.*) function: survival, causal, embedding, clustering, etc."""
-    return await _run_namespace("run_analysis", "tools", function, edata_id, params, in_place, ctx)
+) -> ToolResult:
+    """Run an ehrapy analysis function (ep.tl.*) on an EHRData object.
+
+    Use this for survival analysis (Kaplan-Meier, Cox PH), causal inference (IPTW, AIPW, G-computation),
+    embeddings (UMAP, t-SNE), clustering (Leiden), and differential feature ranking.
+    Returns concise statistical summaries or column profiles.
+    """
+    return await run_dispatch(
+        "analysis",
+        function,
+        edata_id=edata_id,
+        params=params,
+        response_format=response_format,
+        ctx=ctx,
+    )
 
 
 async def run_get(
     function: str,
     edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
+    params: dict | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
     ctx: Context = None,
-) -> str:
-    """Run an ep.get.* accessor (obs_df, var_df, rank_features_groups_df). Read-only."""
-    return await _run_namespace("run_get", "get", function, edata_id, params, True, ctx)
+) -> ToolResult:
+    """Read observation metadata, variable annotations, or ranked feature tables from an EHRData object.
+
+    This is a read-only operation that does not modify the dataset.
+    Always specify keys to narrow returned columns and avoid truncated output.
+    """
+    return await run_dispatch(
+        "get",
+        function,
+        edata_id=edata_id,
+        params=params,
+        response_format=response_format,
+        ctx=ctx,
+    )
 
 
 async def run_plot(
     function: str,
     edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
+    params: dict | None = None,
     ctx: Context = None,
-) -> str:
-    """Run an ep.plot.* visualization. Saves PNG to cache and returns path."""
-    return await _run_namespace("run_plot", "plot", function, edata_id, params, True, ctx)
+) -> ToolResult:
+    """Render a visualization for an EHRData object and save it as a PNG artifact.
+
+    Use this for QC plots, survival curves, embedding projections, and causal balance diagnostics.
+    Returns an image payload and file path.
+    """
+    return await run_dispatch(
+        "plot",
+        function,
+        edata_id=edata_id,
+        params=params,
+        ctx=ctx,
+    )
 
 
 async def run_io(
     function: str,
     edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
+    params: dict | None = None,
+    response_format: Literal["concise", "detailed"] = "concise",
     ctx: Context = None,
-) -> str:
-    """Run ehrdata.io.* (read_csv, write_h5ed, from_pandas, ...). Loads return new edata_id."""
-    return await _run_namespace("run_io", "io", function, edata_id, params, True, ctx)
+) -> ToolResult:
+    """Execute an EHRData I/O function to read from or write to disk.
 
-
-async def load_demo_dataset(
-    dataset: str,
-    params: dict[str, Any] | None = None,
-    ctx: Context = None,
-) -> str:
-    """Load a built-in ehrdata.dt demo cohort (mimic_2, physionet2012, ...)."""
-    return await _run_namespace("load_demo_dataset", "dt", dataset, None, params, True, ctx)
-
-
-async def fork_edata_handle(
-    edata_id: str | None = None,
-    name: str | None = None,
-    ctx: Context = None,
-) -> str:
-    """Copy an edata_id to a new handle before destructive edits."""
-    session = get_session(ctx)
-    handle = edata_id or session.edata_id
-    if not handle:
-        return mcp_error(
-            "fork_edata_handle",
-            "No edata_id provided.",
-            error_code="EDATA_ID_MISSING",
-        )
-    try:
-        record = fork_edata(handle, name=name)
-        session.edata_id = record.edata_id
-        return json.dumps(dataclasses.asdict(record), indent=2)
-    except KeyError:
-        return unknown_handle_error("fork_edata_handle", "edata_id", handle)
-    except Exception as exc:  # noqa: BLE001
-        return mcp_error("fork_edata_handle", str(exc))
-
-
-async def export_edata(
-    path: str,
-    edata_id: str | None = None,
-    format: str = "h5ed",
-    ctx: Context = None,
-) -> str:
-    """Write cached EHRData to a host-visible path (h5ed or csv via to_pandas)."""
-    session = get_session(ctx)
-    handle = edata_id or session.edata_id
-    if not handle:
-        return mcp_error("export_edata", "No edata_id provided.", error_code="EDATA_ID_MISSING")
-    try:
-        if format == "h5ed":
-            return await run_io("write_h5ed", handle, {"filename": path}, ctx)
-        if format == "csv":
-            from ehrdata.io import to_pandas
-
-            edata = load_edata(handle)
-            df = to_pandas(edata)
-            df.to_csv(path, index=False)
-            return json.dumps({"status": "ok", "path": path, "format": "csv"}, indent=2)
-        return mcp_error(
-            "export_edata",
-            f"Unsupported format '{format}'.",
-            error_code="FORMAT_UNSUPPORTED",
-            agent_action="Use format='h5ed' or 'csv'.",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return mcp_error("export_edata", str(exc))
-
-
-async def get_edata_snapshot(
-    edata_id: str | None = None,
-    ctx: Context = None,
-) -> str:
-    """Return obs/var column names, shape, layers, and uns keys for an edata_id."""
-    session = get_session(ctx)
-    handle = edata_id or session.edata_id
-    if not handle:
-        return mcp_error("get_edata_snapshot", "No edata_id provided.", error_code="EDATA_ID_MISSING")
-    try:
-        edata = load_edata(handle)
-        payload = {
-            "status": "ok",
-            "edata_id": handle,
-            "n_obs": edata.n_obs,
-            "n_vars": edata.n_vars,
-            "shape": list(edata.shape),
-            "obs_columns": list(edata.obs.columns[:100]),
-            "var_columns": list(edata.var.columns[:100]),
-            "layers": list(getattr(edata, "layers", {}).keys()),
-            "obsm_keys": list(getattr(edata, "obsm", {}).keys()),
-            "uns_keys": list(getattr(edata, "uns", {}).keys()),
-        }
-        return json.dumps(payload, indent=2)
-    except KeyError:
-        return unknown_handle_error("get_edata_snapshot", "edata_id", handle)
-    except Exception as exc:  # noqa: BLE001
-        return mcp_error("get_edata_snapshot", str(exc))
+    Use this for advanced file format conversions and data loading.
+    """
+    return await run_dispatch(
+        "io",
+        function,
+        edata_id=edata_id,
+        params=params,
+        response_format=response_format,
+        ctx=ctx,
+    )

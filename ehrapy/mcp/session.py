@@ -10,6 +10,14 @@ from typing import Any
 class _EHRapySession:
     edata_id: str | None = None
 
+    def get_latest_edata_id(self) -> str | None:
+        """Return the active edata_id for this session."""
+        return self.edata_id
+
+    def set_latest_edata_id(self, edata_id: str | None) -> None:
+        """Set the active edata_id for this session."""
+        self.edata_id = edata_id
+
 
 _SESSIONS: dict[str, _EHRapySession] = {}
 
@@ -32,3 +40,8 @@ def get_session(ctx: Any = None) -> _EHRapySession:
     if key not in _SESSIONS:
         _SESSIONS[key] = _EHRapySession()
     return _SESSIONS[key]
+
+
+def reset_sessions() -> None:
+    """Reset all session states (useful for testing)."""
+    _SESSIONS.clear()

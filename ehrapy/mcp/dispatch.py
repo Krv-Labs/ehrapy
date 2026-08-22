@@ -1,239 +1,482 @@
-"""Dispatch ehrapy / ehrdata functions from MCP tools."""
+"""Dispatch engine for ehrapy/ehrdata namespaces with dual-channel output."""
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-import json
-from typing import Any
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from fastmcp.tools.tool import ToolResult
+from fastmcp.utilities.types import Image
 
-from ehrdata import EHRData
-
-from ehrapy.mcp.catalog import function_help, get_callable, get_namespace_kind
+from ehrapy.mcp.catalog import get_callable, get_namespace_kind
 from ehrapy.mcp.edata_store import load_edata, persist_edata, save_edata
+from ehrapy.mcp.errors import (
+    mcp_error,
+    path_access_error,
+    unknown_argument_error,
+    unknown_handle_error,
+)
+from ehrapy.mcp.policy import PathNotAllowedError, ReadOnlyModeError, check_path_allowed
 from ehrapy.mcp.registry import registry
 from ehrapy.mcp.serialization import serialize_result
 from ehrapy.mcp.session import get_session
+from ehrapy.mcp.steering import get_suggested_next
 
+from fastmcp import Context  # noqa: TC002
 
-def _coerce_params(fn: Any, params: dict[str, Any] | None) -> dict[str, Any]:
-    if not params:
-        return {}
-    sig = inspect.signature(fn)
-    coerced: dict[str, Any] = {}
-    for key, value in params.items():
-        if key not in sig.parameters:
-            coerced[key] = value
-            continue
-        ann = sig.parameters[key].annotation
-        if ann is inspect.Parameter.empty:
-            coerced[key] = value
-            continue
-        # JSON may deliver lists where tuples are expected
-        if ann in (tuple, tuple[Any, ...]) or "tuple" in str(ann).lower():
-            if isinstance(value, list):
-                coerced[key] = tuple(value)
-                continue
-        coerced[key] = value
-    return coerced
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-
-def _first_param_name(fn: Any) -> str | None:
-    params = list(inspect.signature(fn).parameters.values())
-    if not params:
-        return None
-    return params[0].name
-
-
-def _inject_edata(fn: Any, edata: EHRData, params: dict[str, Any]) -> dict[str, Any]:
-    first = _first_param_name(fn)
-    if first and first not in params:
-        params = {first: edata, **params}
-    return params
-
-
-def _require_edata_id(edata_id: str | None, session: Any, message: str) -> str:
-    handle = edata_id or session.edata_id
-    if not handle:
-        raise ValueError(message)
-    return handle
-
-
-def _ok(
-    namespace: str,
-    function: str,
-    result: Any,
-    *,
-    edata_id: str | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "status": "ok",
-        "namespace": namespace,
-        "function": function,
-        "result": result,
+SLOW_FUNCTIONS = frozenset(
+    {
+        "knn_impute",
+        "miss_forest_impute",
+        "neighbors",
+        "umap",
+        "tsne",
+        "leiden",
+        "iptw",
+        "aipw",
+        "g_computation",
+        "t_learner",
+        "read_csv",
     }
-    if edata_id is not None:
-        payload["edata_id"] = edata_id
-    return payload
+)
 
 
-def _dispatch_edata_or_plot(
-    fn: Any,
-    namespace: str,
-    function: str,
-    kind: str,
-    *,
-    edata_id: str | None,
-    params: dict[str, Any],
-    session: Any,
-    plots_dir: Any,
-    in_place: bool,
-) -> dict[str, Any]:
-    edata_id = _require_edata_id(edata_id, session, "edata_id is required for this operation")
-    edata = load_edata(edata_id)
-    call_params = _inject_edata(fn, edata, params)
-    result = fn(**call_params) if call_params else fn(edata)
-    if isinstance(result, EHRData):
-        record = save_edata(result, name=f"{function}-result", parent_id=edata_id)
-        session.edata_id = record.edata_id
-        return _ok(
-            namespace,
-            function,
-            serialize_result(result, plots_dir=plots_dir),
-            edata_id=record.edata_id,
-        )
-    if in_place and kind == "edata":
-        persist_edata(edata_id, edata)
-    session.edata_id = edata_id
-    return _ok(
-        namespace,
-        function,
-        serialize_result(result, plots_dir=plots_dir if kind == "plot" else None),
-        edata_id=edata_id,
-    )
+def _inject_edata(fn: Callable[..., Any], edata: Any, params: dict[str, Any]) -> Any:
+    """Inject edata as first positional parameter if required by signature."""
+    sig = inspect.signature(fn)
+    param_names = list(sig.parameters.keys())
+    if not param_names:
+        return fn(**params)
+
+    first_param = param_names[0]
+    if first_param in params:
+        return fn(**params)
+
+    # First parameter receives edata
+    return fn(edata, **params)
 
 
-def _dispatch_io(
-    fn: Any,
-    namespace: str,
-    function: str,
-    *,
-    edata_id: str | None,
-    params: dict[str, Any],
-    session: Any,
-    plots_dir: Any,
-) -> dict[str, Any]:
-    first = _first_param_name(fn)
-    if first == "edata" or "edata" in params:
-        edata_id = _require_edata_id(edata_id, session, "edata_id is required for write/export io operations")
-        edata = load_edata(edata_id)
-        result = fn(**_inject_edata(fn, edata, params))
-        return _ok(
-            namespace,
-            function,
-            serialize_result(result, plots_dir=plots_dir),
-            edata_id=edata_id,
-        )
-    result = fn(**params)
-    if isinstance(result, EHRData):
-        record = save_edata(result, name=f"{function}-{result.n_obs}x{result.n_vars}")
-        session.edata_id = record.edata_id
-        return _ok(
-            namespace,
-            function,
-            {"type": "EHRData", "n_obs": result.n_obs, "n_vars": result.n_vars},
-            edata_id=record.edata_id,
-        )
-    return _ok(namespace, function, serialize_result(result))
-
-
-def _dispatch_demo(
-    fn: Any,
-    namespace: str,
-    function: str,
-    *,
-    params: dict[str, Any],
-    session: Any,
-) -> dict[str, Any]:
-    result = fn(**params)
-    if not isinstance(result, EHRData):
-        raise TypeError(f"Demo loader {function} did not return EHRData")
-    record = save_edata(result, name=function, fmt="demo")
-    session.edata_id = record.edata_id
-    return _ok(
-        namespace,
-        function,
-        {"type": "EHRData", "n_obs": result.n_obs, "n_vars": result.n_vars},
-        edata_id=record.edata_id,
-    )
-
-
-def run_dispatch(
+async def run_dispatch(
     namespace: str,
     function: str,
     *,
     edata_id: str | None = None,
     params: dict[str, Any] | None = None,
-    ctx: Any = None,
-    in_place: bool = True,
-) -> dict[str, Any]:
-    """Invoke a namespaced ehrapy function and serialize the result."""
-    fn = get_callable(namespace, function)
-    kind = get_namespace_kind(namespace)
-    params = _coerce_params(fn, params)
-    plots_dir = registry.plots_dir()
-    session = get_session(ctx)
-    if kind in {"edata", "plot"}:
-        return _dispatch_edata_or_plot(
-            fn,
-            namespace,
-            function,
-            kind,
-            edata_id=edata_id,
-            params=params,
-            session=session,
-            plots_dir=plots_dir,
-            in_place=in_place,
+    response_format: Literal["concise", "detailed"] = "concise",
+    ctx: Context | None = None,
+) -> ToolResult:
+    """Execute a function from an ehrapy namespace and return a dual-channel ToolResult."""
+    params = dict(params or {})
+    tool_name = f"run_{namespace}" if namespace != "demo" else "load_demo_dataset"
+    session = get_session()
+
+    # Progress reporting for slow functions
+    if ctx is not None and function in SLOW_FUNCTIONS:
+        try:
+            await ctx.info(f"Starting {namespace}.{function}...")
+            await ctx.report_progress(progress=0, total=100)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Resolve callable
+    try:
+        fn = get_callable(namespace, function)
+        kind = get_namespace_kind(namespace)
+    except KeyError as exc:
+        return mcp_error(
+            tool_name,
+            str(exc),
+            error_code="UNKNOWN_FUNCTION",
+            agent_action=f"Call list_ehrapy_functions(namespace='{namespace}') to inspect valid function names.",
         )
-    if kind == "io":
-        return _dispatch_io(
-            fn,
-            namespace,
-            function,
-            edata_id=edata_id,
-            params=params,
-            session=session,
-            plots_dir=plots_dir,
-        )
+
+    # 1. Demo datasets
     if kind == "demo":
-        return _dispatch_demo(fn, namespace, function, params=params, session=session)
-    raise ValueError(f"Unsupported namespace kind '{kind}'")
+        try:
+            edata = fn(**params)
+            record = save_edata(edata, name=function, fmt="demo")
+            session.set_latest_edata_id(record.edata_id)
 
+            suggestions = get_suggested_next(namespace, function)
+            struct: dict[str, Any] = {
+                "status": "ok",
+                "edata_id": record.edata_id,
+                "name": record.name,
+                "n_obs": edata.n_obs,
+                "n_vars": edata.n_vars,
+                "namespace": namespace,
+                "function": function,
+            }
+            if suggestions:
+                struct["suggested_next"] = [s["call"] for s in suggestions]
 
-def dispatch_json(
-    namespace: str,
-    function: str,
-    *,
-    edata_id: str | None = None,
-    params: dict[str, Any] | None = None,
-    ctx: Any = None,
-    in_place: bool = True,
-) -> str:
-    """JSON-encode :func:`run_dispatch`."""
-    payload = run_dispatch(
-        namespace,
-        function,
-        edata_id=edata_id,
-        params=params,
-        ctx=ctx,
-        in_place=in_place,
-    )
-    return json.dumps(payload, indent=2, default=str)
+            md_lines = [
+                f"### Loaded demo dataset `{function}`",
+                f"- **Handle (edata_id):** `{record.edata_id}`",
+                f"- **Observations:** {edata.n_obs}",
+                f"- **Variables:** {edata.n_vars}",
+            ]
+            if suggestions:
+                md_lines.extend(["", "**Suggested next:**"])
+                for s in suggestions:
+                    md_lines.append(f"- `{s['call']}` — {s['reason']}")
 
+            if ctx is not None and function in SLOW_FUNCTIONS:
+                try:
+                    await ctx.report_progress(progress=100, total=100)
+                except Exception:  # noqa: BLE001
+                    pass
 
-def help_json(namespace: str, function: str) -> str:
-    """JSON-encode :func:`function_help`."""
-    return json.dumps(function_help(namespace, function), indent=2)
+            return ToolResult(structured_content=struct, content="\n".join(md_lines))
+        except Exception as exc:  # noqa: BLE001
+            return mcp_error(
+                tool_name,
+                f"Failed to load demo dataset '{function}': {exc}",
+                error_code="DEMO_LOAD_ERROR",
+            )
+
+    # 2. IO read functions (standalone ingestion)
+    if kind == "io" and function.startswith("read_"):
+        try:
+            file_arg = params.get("filename") or params.get("path") or params.get("file_path")
+            if file_arg:
+                checked_path = check_path_allowed(file_arg, for_write=False)
+                # Update param with resolved path string
+                for k in ("filename", "path", "file_path"):
+                    if k in params:
+                        params[k] = str(checked_path)
+
+            edata = fn(**params)
+            name_stem = Path(file_arg).name if file_arg else function
+            record = save_edata(edata, name=name_stem, source_path=str(file_arg) if file_arg else None)
+            session.set_latest_edata_id(record.edata_id)
+
+            suggestions = get_suggested_next(namespace, function)
+            struct = {
+                "status": "ok",
+                "edata_id": record.edata_id,
+                "name": record.name,
+                "n_obs": edata.n_obs,
+                "n_vars": edata.n_vars,
+                "namespace": namespace,
+                "function": function,
+            }
+            if suggestions:
+                struct["suggested_next"] = [s["call"] for s in suggestions]
+
+            md_lines = [
+                f"### Loaded dataset from `{file_arg or function}`",
+                f"- **Handle (edata_id):** `{record.edata_id}`",
+                f"- **Observations:** {edata.n_obs}",
+                f"- **Variables:** {edata.n_vars}",
+            ]
+            if suggestions:
+                md_lines.extend(["", "**Suggested next:**"])
+                for s in suggestions:
+                    md_lines.append(f"- `{s['call']}` — {s['reason']}")
+
+            return ToolResult(structured_content=struct, content="\n".join(md_lines))
+        except PathNotAllowedError as exc:
+            return mcp_error(
+                tool_name,
+                str(exc),
+                error_code=exc.error_code,
+                agent_action=exc.agent_action,
+            )
+        except ReadOnlyModeError as exc:
+            return mcp_error(
+                tool_name,
+                str(exc),
+                error_code=exc.error_code,
+                agent_action=exc.agent_action,
+            )
+        except FileNotFoundError:
+            return path_access_error(tool_name, str(params.get("filename") or params.get("path") or ""))
+        except Exception as exc:  # noqa: BLE001
+            return mcp_error(tool_name, f"IO read failed: {exc}", error_code="IO_READ_ERROR")
+
+    # For all other operations, resolve the active dataset handle
+    used_latest = False
+    handle = edata_id
+    if handle is None:
+        handle = session.get_latest_edata_id()
+        used_latest = True
+
+    if handle is None:
+        return mcp_error(
+            tool_name,
+            "No dataset handle provided and no active dataset in session.",
+            error_code="NO_ACTIVE_DATASET",
+            agent_action="Load a dataset with load_demo_dataset(dataset='mimic_2') or ingest_dataset(file_path=...).",
+        )
+
+    # Load dataset
+    try:
+        edata = load_edata(handle)
+    except (KeyError, FileNotFoundError):
+        return unknown_handle_error(tool_name, "edata_id", handle)
+    except Exception as exc:  # noqa: BLE001
+        return mcp_error(
+            tool_name,
+            f"Failed to load dataset '{handle}': {exc}",
+            error_code="DATASET_LOAD_ERROR",
+        )
+
+    # 3. Read-Only get namespace (T1)
+    if kind == "get":
+        try:
+            res = _inject_edata(fn, edata, params)
+            meta, content_payload = serialize_result(
+                res,
+                response_format=response_format,
+                params=params,
+                function=function,
+                edata=edata,
+            )
+            suggestions = get_suggested_next(namespace, function)
+
+            status_val = meta.get("status", "ok")
+            struct = {
+                "status": status_val,
+                "edata_id": handle,
+                "namespace": namespace,
+                "function": function,
+                **{k: v for k, v in meta.items() if k != "status"},
+            }
+            if used_latest:
+                struct["used_latest"] = True
+            if suggestions:
+                struct["suggested_next"] = [s["call"] for s in suggestions]
+
+            md_content = (
+                content_payload if isinstance(content_payload, str) else "\n".join(str(c) for c in content_payload)
+            )
+            if suggestions:
+                sug_lines = ["\n\n**Suggested next:**"]
+                for s in suggestions:
+                    sug_lines.append(f"- `{s['call']}` — {s['reason']}")
+                md_content += "\n".join(sug_lines)
+
+            return ToolResult(structured_content=struct, content=md_content)
+        except Exception as exc:  # noqa: BLE001
+            return mcp_error(tool_name, f"Get operation failed: {exc}", error_code="GET_ERROR")
+
+    # 4. Plot namespace (T10)
+    if kind == "plot":
+        try:
+            # Inject show=False if function accepts show
+            sig = inspect.signature(fn)
+            if "show" in sig.parameters and "show" not in params:
+                params["show"] = False
+
+            plt.close("all")
+            res = _inject_edata(fn, edata, params)
+            if res is None and plt.get_fignums():
+                res = plt.gcf()
+
+            meta, content_payload = serialize_result(
+                res,
+                plots_dir=registry.plots_dir(),
+                params=params,
+                function=function,
+                edata=edata,
+            )
+            plt.close("all")
+
+            suggestions = get_suggested_next(namespace, function)
+            struct = {
+                "status": "ok",
+                "edata_id": handle,
+                "namespace": namespace,
+                "function": function,
+                **meta,
+            }
+            if used_latest:
+                struct["used_latest"] = True
+            if suggestions:
+                struct["suggested_next"] = [s["call"] for s in suggestions]
+
+            # Build ToolResult content blocks
+            content_blocks: list[Any] = []
+            if isinstance(content_payload, list):
+                for item in content_payload:
+                    content_blocks.append(item)
+            else:
+                content_blocks.append(content_payload)
+
+            if suggestions:
+                sug_lines = ["\n\n**Suggested next:**"]
+                for s in suggestions:
+                    sug_lines.append(f"- `{s['call']}` — {s['reason']}")
+                content_blocks.append("\n".join(sug_lines))
+
+            return ToolResult(structured_content=struct, content=content_blocks)
+        except Exception as exc:  # noqa: BLE001
+            plt.close("all")
+            return mcp_error(tool_name, f"Plot rendering failed: {exc}", error_code="PLOT_ERROR")
+
+    # 5. IO write / export / to_pandas functions
+    if kind == "io":
+        try:
+            if function == "to_pandas":
+                df = fn(edata, **params)
+                meta, content_payload = serialize_result(
+                    df,
+                    response_format=response_format,
+                    params=params,
+                    function=function,
+                    edata=edata,
+                )
+                struct = {
+                    "status": "ok",
+                    "edata_id": handle,
+                    "namespace": namespace,
+                    "function": function,
+                    **meta,
+                }
+                if used_latest:
+                    struct["used_latest"] = True
+                return ToolResult(
+                    structured_content=struct,
+                    content=(content_payload if isinstance(content_payload, str) else str(content_payload)),
+                )
+
+            # write functions
+            target_path = params.get("filename") or params.get("path") or params.get("file_path")
+            if target_path:
+                checked_path = check_path_allowed(target_path, for_write=True, operation=function)
+                for k in ("filename", "path", "file_path"):
+                    if k in params:
+                        params[k] = str(checked_path)
+
+            fn(edata, **params)
+            struct = {
+                "status": "ok",
+                "edata_id": handle,
+                "namespace": namespace,
+                "function": function,
+                "target_path": str(target_path) if target_path else None,
+            }
+            if used_latest:
+                struct["used_latest"] = True
+            md = f"Dataset `{handle}` successfully exported to `{target_path}`."
+            return ToolResult(structured_content=struct, content=md)
+        except PathNotAllowedError as exc:
+            return mcp_error(
+                tool_name,
+                str(exc),
+                error_code=exc.error_code,
+                agent_action=exc.agent_action,
+            )
+        except ReadOnlyModeError as exc:
+            return mcp_error(
+                tool_name,
+                str(exc),
+                error_code=exc.error_code,
+                agent_action=exc.agent_action,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return mcp_error(tool_name, f"IO operation failed: {exc}", error_code="IO_ERROR")
+
+    # 6. Mutating edata namespaces (preprocessing & analysis)
+    if kind == "edata":
+        try:
+            res = _inject_edata(fn, edata, params)
+            if hasattr(res, "n_obs") and hasattr(res, "n_vars"):
+                # Function returned a modified copy
+                edata = res
+
+            # Op-log provenance tracking (T19)
+            import json
+
+            ops = edata.uns.setdefault("ehrapy_mcp_ops", [])
+            ops.append(
+                json.dumps(
+                    {
+                        "namespace": namespace,
+                        "function": function,
+                        "params": {
+                            str(k): (v if isinstance(v, (int, float, str, bool, list)) else str(v))
+                            for k, v in params.items()
+                        },
+                        "timestamp": time.time(),
+                    }
+                )
+            )
+
+            # Persist dataset write-through
+            persist_edata(handle, edata)
+            session.set_latest_edata_id(handle)
+
+            meta, content_payload = serialize_result(
+                res,
+                response_format=response_format,
+                params=params,
+                function=function,
+                edata=edata,
+            )
+            suggestions = get_suggested_next(namespace, function)
+
+            struct = {
+                "status": "ok",
+                "edata_id": handle,
+                "n_obs": edata.n_obs,
+                "n_vars": edata.n_vars,
+                "namespace": namespace,
+                "function": function,
+                **meta,
+            }
+            if used_latest:
+                struct["used_latest"] = True
+            if suggestions:
+                struct["suggested_next"] = [s["call"] for s in suggestions]
+
+            md_content = (
+                content_payload if isinstance(content_payload, str) else "\n".join(str(c) for c in content_payload)
+            )
+            if suggestions:
+                sug_lines = ["\n\n**Suggested next:**"]
+                for s in suggestions:
+                    sug_lines.append(f"- `{s['call']}` — {s['reason']}")
+                md_content += "\n".join(sug_lines)
+
+            if ctx is not None and function in SLOW_FUNCTIONS:
+                try:
+                    await ctx.report_progress(progress=100, total=100)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            return ToolResult(structured_content=struct, content=md_content)
+        except TypeError as exc:
+            return mcp_error(
+                tool_name,
+                f"Invalid parameter for {namespace}.{function}: {exc}",
+                error_code="INVALID_PARAMETER",
+                agent_action=f"Call get_function_help(namespace='{namespace}', function='{function}') to inspect valid parameters.",
+            )
+        except ValueError as exc:
+            return mcp_error(
+                tool_name,
+                f"Value error in {namespace}.{function}: {exc}",
+                error_code="INVALID_VALUE",
+                agent_action=f"Inspect data or parameters for {namespace}.{function}.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return mcp_error(
+                tool_name,
+                f"Execution failed in {namespace}.{function}: {exc}",
+                error_code="EXECUTION_ERROR",
+                agent_action=f"Call get_function_help(namespace='{namespace}', function='{function}') to verify usage.",
+            )
+
+    return mcp_error(tool_name, f"Unhandled namespace kind '{kind}'", error_code="UNHANDLED_KIND")
