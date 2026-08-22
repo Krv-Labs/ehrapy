@@ -224,13 +224,13 @@ def _sample_rows(
     tail_n = min(5, n_rows - head_n)
     middle_n = max(0, row_budget - head_n - tail_n)
 
-    head_idx = list(df.index[:head_n])
-    tail_idx = list(df.index[-tail_n:]) if tail_n > 0 else []
-    remaining_idx = [i for i in df.index if i not in head_idx and i not in tail_idx]
+    head_pos = list(range(head_n))
+    tail_pos = list(range(n_rows - tail_n, n_rows)) if tail_n > 0 else []
+    mid_pos_range = list(range(head_n, n_rows - tail_n))
 
-    sample_idx: list[Any] = []
-    if middle_n > 0 and remaining_idx:
-        mid_df = df.loc[remaining_idx]
+    sample_pos: list[int] = []
+    if middle_n > 0 and mid_pos_range:
+        mid_df = df.iloc[mid_pos_range]
         strat_col = None
         for col in relevant_cols:
             if col in df.columns and (
@@ -238,34 +238,29 @@ def _sample_rows(
             ):
                 strat_col = col
                 break
+
+        pos_series = pd.Series(range(len(mid_df)))
         if strat_col is not None and mid_df[strat_col].nunique() > 1:
             try:
-                sampled = mid_df.groupby(strat_col, group_keys=False).apply(
-                    lambda g: g.sample(max(1, int(len(g) / len(mid_df) * middle_n)), random_state=42)
+                strat_labels = pd.Series(mid_df[strat_col].to_numpy())
+                grouped = pos_series.groupby(strat_labels, group_keys=False)
+                sampled_rel = grouped.apply(
+                    lambda g: g.sample(max(1, int(len(g) / len(pos_series) * middle_n)), random_state=42)
                 )
-                sample_idx = list(sampled.index[:middle_n])
+                chosen_rel = list(sampled_rel.iloc[:middle_n])
             except Exception:  # noqa: BLE001
-                sample_idx = list(mid_df.sample(min(middle_n, len(mid_df)), random_state=42).index)
+                chosen_rel = list(pos_series.sample(min(middle_n, len(pos_series)), random_state=42))
         else:
-            sample_idx = list(mid_df.sample(min(middle_n, len(mid_df)), random_state=42).index)
+            chosen_rel = list(pos_series.sample(min(middle_n, len(pos_series)), random_state=42))
 
-    rows = []
-    for idx in head_idx:
-        r = df.loc[idx].to_dict()
-        r["sample"] = "head"
-        rows.append(r)
-    for idx in sample_idx:
-        r = df.loc[idx].to_dict()
-        r["sample"] = "sample"
-        rows.append(r)
-    for idx in tail_idx:
-        r = df.loc[idx].to_dict()
-        r["sample"] = "tail"
-        rows.append(r)
+        sample_pos = [mid_pos_range[p] for p in chosen_rel]
 
-    sampled_df = pd.DataFrame(rows)
-    cols = ["sample"] + [c for c in sampled_df.columns if c != "sample"]
-    return sampled_df[cols]
+    all_positions = head_pos + sample_pos + tail_pos
+    sample_tags = ["head"] * len(head_pos) + ["sample"] * len(sample_pos) + ["tail"] * len(tail_pos)
+
+    sampled_df = df.iloc[all_positions].copy()
+    sampled_df.insert(0, "sample", sample_tags)
+    return sampled_df
 
 
 def _serialize_dataframe(
