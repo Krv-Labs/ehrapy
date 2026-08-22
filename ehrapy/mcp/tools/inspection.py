@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from fastmcp import Context  # noqa: TC002
 
 from ehrapy.mcp.tools.dispatch_tools import get_edata_snapshot
-
-if TYPE_CHECKING:
-    from fastmcp import Context
 
 
 async def summarize_edata(

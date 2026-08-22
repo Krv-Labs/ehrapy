@@ -3,16 +3,13 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ehrdata.io import read_csv
+from fastmcp import Context  # noqa: TC002
 
 from ehrapy.mcp.edata_store import save_edata
 from ehrapy.mcp.errors import mcp_error, path_access_error
 from ehrapy.mcp.session import get_session
-
-if TYPE_CHECKING:
-    from fastmcp import Context
 
 
 def _infer_format(path: Path) -> str:

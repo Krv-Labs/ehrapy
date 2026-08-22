@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from fastmcp import Context  # noqa: TC002
 
 import ehrapy as ep
 from ehrapy.mcp.catalog import catalog_summary
 from ehrapy.mcp.prompts import WORKFLOW_PROMPT
 from ehrapy.mcp.registry import registry
 from ehrapy.mcp.session import get_session
-
-if TYPE_CHECKING:
-    from fastmcp import Context
 
 
 async def get_workflow_guide(ctx: Context = None) -> str:

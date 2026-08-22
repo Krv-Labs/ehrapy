@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from fastmcp import Context
+from fastmcp import Context  # noqa: TC002
 
 from ehrapy.mcp.catalog import catalog_summary, list_functions, list_namespaces
 from ehrapy.mcp.dispatch import dispatch_json, help_json
