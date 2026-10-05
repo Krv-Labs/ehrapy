@@ -76,6 +76,59 @@ def _get_default_demo_data_dir(cache_dir: Path) -> Path:
     return Path(tempfile.mkdtemp(prefix="ehrapy_demo_data_"))
 
 
+def _contain_tempdir(cache_dir: Path) -> Path | None:
+    """Pin the process temp directory inside ``cache_dir`` while confinement is locked.
+
+    Third-party code calls ``tempfile`` with no regard for the boundary this
+    module enforces. ehrdata's demo loader runs ``tempfile.mkdtemp()`` for every
+    compressed cohort archive (``physionet2012``, ``physionet2019``) no matter
+    which output path it is handed, and never removes it; pooch, matplotlib and
+    the standard library reach for the shared system temp directory the same way.
+    None of those calls can be intercepted from ehrapy, and on their success path
+    they raise no error for our guards to catch. So while confinement is locked
+    the temp directory itself is moved to ``<cache_dir>/tmp`` -- a location the
+    supervisor erases -- which makes an otherwise invisible leak land inside the
+    boundary instead of outside it.
+
+    A ``TMPDIR`` inherited from the operator does not win over the pinned cache.
+    It may be an arbitrary leftover from a parent process, while the pinned cache
+    is precisely the directory the supervisor knows about and erases; a temp file
+    the supervisor cannot find is a leak it does not know it has, so the boundary
+    covers the environment too. When confinement is not locked this is a no-op
+    and the operator's ``TMPDIR`` keeps working, because standalone ehrapy owns
+    its own boundary.
+
+    The change is process-global: every library in this interpreter resolves
+    ``tempfile.gettempdir()`` to the pinned directory from here on. Repeated
+    calls are safe and simply re-pin the same directory.
+
+    Args:
+        cache_dir: Resolved cache directory the temp directory must live under.
+
+    Returns:
+        The contained temp directory, or None when confinement is not locked.
+
+    Raises:
+        OSError: The directory could not be created. Callers should fail closed
+            rather than run with an uncontained temp directory.
+    """
+    if not is_confinement_locked():
+        return None
+    target = cache_dir / "tmp"
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        # Tighten a pre-existing directory too; best-effort like `_ensure_cache_dir`,
+        # because `mkdir` above already asked for 0o700 and the parent cache is 0o700.
+        target.chmod(0o700)
+    except OSError:
+        pass
+    os.environ["TMPDIR"] = str(target)
+    # `tempfile` caches its resolved directory; without dropping that cache it keeps
+    # serving the old path no matter what the environment now says.
+    tempfile.tempdir = None
+    return target
+
+
 @dataclass
 class DatasetRecord:
     """Metadata for a cached EHRData handle."""

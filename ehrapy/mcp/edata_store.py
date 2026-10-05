@@ -149,6 +149,9 @@ def persist_edata(edata_id: str, edata: EHRData) -> DatasetRecord:
     record = registry.get_dataset(edata_id)
     if record is None:
         return save_edata(edata, name=f"edata-{edata_id[:8]}")
+    # Overwrites are cache writes too: when the pinned cache is gone the
+    # write must fail as CACHE_DIR_UNAVAILABLE, never bare OSError.
+    registry.require_usable()
     cache_path = Path(record.cache_path)
     write_h5ed(edata, cache_path)
     stat = cache_path.stat()

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp.tools.tool import ToolResult
+
+if TYPE_CHECKING:
+    from ehrapy.mcp.policy import SecurityPolicyError
 
 _SANDBOX_PATH_PREFIXES = (
     "/home/claude",
@@ -57,6 +60,11 @@ def mcp_error(
 
     md = format_error_markdown(clean_reason, error_code=error_code, agent_action=agent_action)
     return ToolResult(content=md, structured_content=struct, is_error=is_error)
+
+
+def policy_error_result(tool: str, exc: SecurityPolicyError) -> ToolResult:
+    """Translate a SecurityPolicyError into its structured error ToolResult."""
+    return mcp_error(tool, str(exc), error_code=exc.error_code, agent_action=exc.agent_action)
 
 
 def classify_path(path: str) -> dict[str, Any]:

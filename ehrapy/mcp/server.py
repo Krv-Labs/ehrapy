@@ -13,7 +13,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from ehrapy.mcp.errors import unknown_argument_error
 from ehrapy.mcp.policy import is_confinement_locked
 from ehrapy.mcp.prompts import SERVER_INSTRUCTIONS
-from ehrapy.mcp.registry import registry
+from ehrapy.mcp.registry import _contain_tempdir, registry
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
 
 if TYPE_CHECKING:
@@ -221,6 +221,27 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
+
+    # After the gate above, so a server that refuses to start mutates nothing.
+    # Third-party tempfile users we do not control (ehrdata unpacks compressed
+    # demo archives with tempfile.mkdtemp(), plus pooch, matplotlib and the stdlib)
+    # would otherwise write to the system temp directory on their success path,
+    # outside the pinned boundary, with no error for ehrapy's guards to catch.
+    # This pins the whole process temp directory inside the cache instead; see
+    # `_contain_tempdir` for why the pinned cache wins over an inherited TMPDIR.
+    try:
+        _contain_tempdir(registry.cache_dir())
+    except OSError as exc:
+        # Fail closed, same shape as the gate above: running with an uncontained
+        # temp directory would quietly reopen the hole this is meant to close.
+        print(
+            f"ehrapy-mcp: refusing to start. Confinement is configured, but the temp directory "
+            f"inside {registry.cache_dir()} could not be created ({exc}).\n"
+            f"Remove whatever blocks that path, or unset EHRAPY_MCP_CACHE_DIR and "
+            f"EHRAPY_MCP_ALLOWED_ROOTS to fall back to the default temp directory.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
 
     if not args.no_purge:
         try:

@@ -24,6 +24,7 @@ from ehrapy.mcp.errors import (
     classify_exception_error,
     mcp_error,
     path_access_error,
+    policy_error_result,
     unknown_handle_error,
 )
 from ehrapy.mcp.policy import SecurityPolicyError, check_path_allowed, is_confinement_locked
@@ -213,11 +214,6 @@ def _content_with_suggestions(content_payload: Any, suggestions: list[dict[str, 
     return md_content
 
 
-def _policy_error(tool_name: str, exc: SecurityPolicyError) -> ToolResult:
-    """Translate a path/read-only policy violation into an MCP error result."""
-    return mcp_error(tool_name, str(exc), error_code=exc.error_code, agent_action=exc.agent_action)
-
-
 def _resolve_path_param(params: dict[str, Any], *, for_write: bool, operation: str = "write") -> str | None:
     """Resolve and rewrite a filename/path/file_path param against the path policy."""
     raw = params.get("filename") or params.get("path") or params.get("file_path")
@@ -368,7 +364,7 @@ async def _dispatch_demo(
             agent_action="Check network connection or load a local dataset via ingest_dataset.",
         )
     except SecurityPolicyError as exc:
-        return _policy_error(tool_name, exc)
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return mcp_error(
             tool_name,
@@ -417,7 +413,7 @@ def _dispatch_io_read(
 
         return ToolResult(structured_content=struct, content="\n".join(md_lines))
     except SecurityPolicyError as exc:
-        return _policy_error(tool_name, exc)
+        return policy_error_result(tool_name, exc)
     except FileNotFoundError:
         return path_access_error(tool_name, str(params.get("filename") or params.get("path") or ""))
     except Exception as exc:  # noqa: BLE001
@@ -606,7 +602,7 @@ def _dispatch_io_write(
         md = f"Dataset `{handle}` successfully exported to `{target_path}`."
         return ToolResult(structured_content=struct, content=md)
     except SecurityPolicyError as exc:
-        return _policy_error(tool_name, exc)
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return classify_exception_error(
             tool_name, exc, namespace=namespace, function=function, fallback_code="IO_ERROR"
@@ -682,6 +678,8 @@ def _dispatch_edata_sync(
             error_code="INVALID_VALUE",
             agent_action=f"Inspect data or parameters for {namespace}.{function}.",
         )
+    except SecurityPolicyError as exc:
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return classify_exception_error(tool_name, exc, namespace=namespace, function=function)
 

@@ -272,7 +272,12 @@ def test_main_still_starts_when_unlocked(tmp_path: Path) -> None:
     env = dict(os.environ)
     for var in LOCK_VARS:
         env.pop(var, None)
-    env["EHRAPY_MCP_CACHE_DIR"] = str(tmp_path / "standalone-cache")
+    # Nothing is pinned, so the child resolves the platform user cache. Redirect
+    # HOME so an unlocked run does not touch the real one; pinning the cache dir
+    # instead would re-lock the process and defeat the point of this test.
+    home = tmp_path / "home"
+    home.mkdir()
+    env["HOME"] = str(home)
     env["MPLBACKEND"] = "Agg"
 
     proc = subprocess.run(
@@ -288,9 +293,10 @@ def test_main_still_starts_when_unlocked(tmp_path: Path) -> None:
         input="",
     )
 
-    # The gate must stay silent when nothing is pinned; stdio then ends on EOF.
+    # Nothing pinned: the fail-closed gate must not fire. If it did, the
+    # server would exit 1 and print the refusal -- both asserted below.
     assert "refusing to start" not in proc.stderr
-    assert proc.returncode != 1 or "refusing to start" not in proc.stderr
+    assert proc.returncode != 1, f"server exited as if locked:\n{proc.stderr}"
 
 
 # --- timeout default ---------------------------------------------------------------------
