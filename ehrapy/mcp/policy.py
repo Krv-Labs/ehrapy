@@ -40,10 +40,49 @@ class ReadOnlyModeError(SecurityPolicyError):
         )
 
 
+class CacheDirUnavailableError(SecurityPolicyError):
+    """Raised when a supervisor-pinned cache directory cannot be created or written.
+
+    Distinct from a plain OSError because the recovery is not "try somewhere else":
+    when confinement is locked, the pinned directory is the whole boundary.
+    """
+
+    def __init__(self, cache_dir: Path) -> None:
+        super().__init__(
+            f"Pinned cache directory '{cache_dir}' does not exist and cannot be created, or is not writable.",
+            error_code="CACHE_DIR_UNAVAILABLE",
+            agent_action=(
+                f"Restore write access to '{cache_dir}'. Falling back to a temporary directory is refused "
+                "while EHRAPY_MCP_CACHE_DIR or EHRAPY_MCP_ALLOWED_ROOTS is set, because anything written "
+                "outside the pinned directory would not be covered by the confinement that erases it."
+            ),
+        )
+        self.cache_dir = cache_dir
+
+
 def is_read_only_mode() -> bool:
     """Return True if EHRAPY_MCP_READ_ONLY is set to 1, true, or yes."""
     val = os.environ.get("EHRAPY_MCP_READ_ONLY", "").strip().lower()
     return val in {"1", "true", "yes"}
+
+
+def is_confinement_locked() -> bool:
+    """Return True when a supervisor has pinned the cache or restricted allowed roots.
+
+    Locked means the process does not own its own on-disk boundary. Whoever set
+    these variables points EHRAPY_MCP_CACHE_DIR at a directory it also erases,
+    and constrains reads to EHRAPY_MCP_ALLOWED_ROOTS. Falling back to a shared
+    temporary directory in that state would put data outside the boundary the
+    supervisor believes it owns, where its erase never reaches it.
+
+    The platform user cache is still acceptable when locked, because a
+    supervisor that pins nothing on disk still erases the documented default
+    location. A `mkdtemp` scratch directory is not, because nothing knows its
+    name.
+    """
+    return bool(os.environ.get("EHRAPY_MCP_CACHE_DIR", "").strip()) or bool(
+        os.environ.get("EHRAPY_MCP_ALLOWED_ROOTS", "").strip()
+    )
 
 
 def get_allowed_roots() -> list[Path] | None:

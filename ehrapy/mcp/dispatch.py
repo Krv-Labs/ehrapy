@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import inspect
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -23,9 +24,10 @@ from ehrapy.mcp.errors import (
     classify_exception_error,
     mcp_error,
     path_access_error,
+    policy_error_result,
     unknown_handle_error,
 )
-from ehrapy.mcp.policy import SecurityPolicyError, check_path_allowed
+from ehrapy.mcp.policy import SecurityPolicyError, check_path_allowed, is_confinement_locked
 from ehrapy.mcp.registry import registry
 from ehrapy.mcp.serialization import serialize_result
 from ehrapy.mcp.session import get_session
@@ -212,11 +214,6 @@ def _content_with_suggestions(content_payload: Any, suggestions: list[dict[str, 
     return md_content
 
 
-def _policy_error(tool_name: str, exc: SecurityPolicyError) -> ToolResult:
-    """Translate a path/read-only policy violation into an MCP error result."""
-    return mcp_error(tool_name, str(exc), error_code=exc.error_code, agent_action=exc.agent_action)
-
-
 def _resolve_path_param(params: dict[str, Any], *, for_write: bool, operation: str = "write") -> str | None:
     """Resolve and rewrite a filename/path/file_path param against the path policy."""
     raw = params.get("filename") or params.get("path") or params.get("file_path")
@@ -270,6 +267,55 @@ def _maybe_cache_fitter(handle: str, function: str, res: Any) -> None:
 # --- Dispatch branches, one per namespace kind --------------------------------------------
 
 
+def get_tool_timeout() -> float:
+    """Return tool execution timeout in seconds.
+
+    Defaults to 270s, deliberately under Renyi's 300s per-call ceiling so a slow
+    tool fails with ehrapy's own structured TIMEOUT error rather than having its
+    child process killed underneath it, while still leaving room for the large
+    survival fits a real cohort produces. Renyi strips
+    EHRAPY_MCP_TIMEOUT_SECONDS from servers.toml, so this default is what a
+    Renyi-managed server actually gets.
+
+    This bounds the wait, not the work: the call runs in a worker thread that
+    asyncio cannot cancel, so a timed-out tool keeps running in the background.
+    A caller that retries should expect the abandoned run to still be mutating
+    the handle.
+    """
+    env_val = os.environ.get("EHRAPY_MCP_TIMEOUT_SECONDS", "").strip()
+    if env_val:
+        try:
+            return max(0.01, float(env_val))
+        except ValueError:
+            pass
+    return 270.0
+
+
+def _load_demo_sync(fn: Callable[..., Any], params: dict[str, Any]) -> Any:
+    # Raises CACHE_DIR_UNAVAILABLE when locked and the demo directory is gone.
+    registry.ensure_demo_data_dir()
+    try:
+        return fn(**params)
+    except OSError:
+        if is_confinement_locked():
+            # A scratch directory here would hold a downloaded cohort outside the
+            # pinned cache, where the supervisor's erase never reaches it.
+            raise
+
+        import tempfile
+
+        import ehrdata.core.constants as ed_const
+        import ehrdata.dt.datasets as ed_datasets
+
+        import ehrapy as ep
+
+        fallback = Path(tempfile.mkdtemp(prefix="ehrapy_demo_fallback_"))
+        ed_const.DEFAULT_DATA_PATH = fallback
+        ed_datasets.DEFAULT_DATA_PATH = fallback
+        ep.settings.datasetdir = fallback
+        return fn(**params)
+
+
 async def _dispatch_demo(
     fn: Callable[..., Any],
     namespace: str,
@@ -281,7 +327,8 @@ async def _dispatch_demo(
 ) -> ToolResult:
     """Load a demo dataset and cache it under a new handle."""
     try:
-        edata = fn(**params)
+        timeout = get_tool_timeout()
+        edata = await asyncio.wait_for(asyncio.to_thread(_load_demo_sync, fn, params), timeout=timeout)
         record = save_edata(edata, name=function, fmt="demo")
         session.set_latest_edata_id(record.edata_id)
 
@@ -309,6 +356,15 @@ async def _dispatch_demo(
         await _report_progress_if_slow(ctx, function, progress=100)
 
         return ToolResult(structured_content=struct, content="\n".join(md_lines))
+    except TimeoutError:
+        return mcp_error(
+            tool_name,
+            f"Failed to load demo dataset '{function}': operation timed out after {get_tool_timeout()}s.",
+            error_code="TIMEOUT",
+            agent_action="Check network connection or load a local dataset via ingest_dataset.",
+        )
+    except SecurityPolicyError as exc:
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return mcp_error(
             tool_name,
@@ -357,7 +413,7 @@ def _dispatch_io_read(
 
         return ToolResult(structured_content=struct, content="\n".join(md_lines))
     except SecurityPolicyError as exc:
-        return _policy_error(tool_name, exc)
+        return policy_error_result(tool_name, exc)
     except FileNotFoundError:
         return path_access_error(tool_name, str(params.get("filename") or params.get("path") or ""))
     except Exception as exc:  # noqa: BLE001
@@ -546,14 +602,14 @@ def _dispatch_io_write(
         md = f"Dataset `{handle}` successfully exported to `{target_path}`."
         return ToolResult(structured_content=struct, content=md)
     except SecurityPolicyError as exc:
-        return _policy_error(tool_name, exc)
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return classify_exception_error(
             tool_name, exc, namespace=namespace, function=function, fallback_code="IO_ERROR"
         )
 
 
-async def _dispatch_edata(
+def _dispatch_edata_sync(
     fn: Callable[..., Any],
     edata: Any,
     handle: str,
@@ -565,7 +621,6 @@ async def _dispatch_edata(
     response_format: Literal["concise", "detailed"],
     session: _EHRapySession,
     tool_name: str,
-    ctx: Context | None,
 ) -> ToolResult:
     """Run a mutating preprocessing/analysis function and persist the result."""
     try:
@@ -608,8 +663,6 @@ async def _dispatch_edata(
 
         md_content = _content_with_suggestions(content_payload, suggestions)
 
-        await _report_progress_if_slow(ctx, function, progress=100)
-
         return ToolResult(structured_content=struct, content=md_content)
     except TypeError as exc:
         return mcp_error(
@@ -625,8 +678,55 @@ async def _dispatch_edata(
             error_code="INVALID_VALUE",
             agent_action=f"Inspect data or parameters for {namespace}.{function}.",
         )
+    except SecurityPolicyError as exc:
+        return policy_error_result(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return classify_exception_error(tool_name, exc, namespace=namespace, function=function)
+
+
+async def _dispatch_edata(
+    fn: Callable[..., Any],
+    edata: Any,
+    handle: str,
+    used_latest: bool,
+    kind: str,
+    namespace: str,
+    function: str,
+    params: dict[str, Any],
+    response_format: Literal["concise", "detailed"],
+    session: _EHRapySession,
+    tool_name: str,
+    ctx: Context | None,
+) -> ToolResult:
+    """Run a mutating preprocessing/analysis function and persist the result."""
+    try:
+        timeout = get_tool_timeout()
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                _dispatch_edata_sync,
+                fn,
+                edata,
+                handle,
+                used_latest,
+                kind,
+                namespace,
+                function,
+                params,
+                response_format,
+                session,
+                tool_name,
+            ),
+            timeout=timeout,
+        )
+        await _report_progress_if_slow(ctx, function, progress=100)
+        return result
+    except TimeoutError:
+        return mcp_error(
+            tool_name,
+            f"Execution of '{namespace}.{function}' timed out after {get_tool_timeout()}s.",
+            error_code="TIMEOUT",
+            agent_action="The operation exceeded the server timeout. Try running on a smaller subset or check parameters.",
+        )
 
 
 def _resolve_handle(edata_id: str | None, session: _EHRapySession) -> tuple[str | None, bool]:
@@ -684,7 +784,18 @@ async def run_dispatch(
 
     # 2. IO read functions (standalone ingestion)
     if kind == "io" and function.startswith("read_"):
-        return _dispatch_io_read(fn, namespace, function, params, session, tool_name)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_dispatch_io_read, fn, namespace, function, params, session, tool_name),
+                timeout=get_tool_timeout(),
+            )
+        except TimeoutError:
+            return mcp_error(
+                tool_name,
+                f"Execution of '{namespace}.{function}' timed out after {get_tool_timeout()}s.",
+                error_code="TIMEOUT",
+                agent_action="The operation exceeded the server timeout.",
+            )
 
     # For all other operations, resolve the active dataset handle
     handle, used_latest = _resolve_handle(edata_id, session)
@@ -700,18 +811,58 @@ async def run_dispatch(
     if error is not None:
         return error
 
-    # 3. Read-Only get namespace (T1)
-    if kind == "get":
-        return _dispatch_get(fn, edata, handle, used_latest, namespace, function, params, response_format, tool_name)
+    timeout = get_tool_timeout()
+    try:
+        # 3. Read-Only get namespace (T1)
+        if kind == "get":
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _dispatch_get,
+                    fn,
+                    edata,
+                    handle,
+                    used_latest,
+                    namespace,
+                    function,
+                    params,
+                    response_format,
+                    tool_name,
+                ),
+                timeout=timeout,
+            )
 
-    # 4. Plot namespace (T10)
-    if kind == "plot":
-        return _dispatch_plot(fn, edata, handle, used_latest, namespace, function, params, tool_name)
+        # 4. Plot namespace (T10)
+        if kind == "plot":
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _dispatch_plot, fn, edata, handle, used_latest, namespace, function, params, tool_name
+                ),
+                timeout=timeout,
+            )
 
-    # 5. IO write / export / to_pandas functions
-    if kind == "io":
-        return _dispatch_io_write(
-            fn, edata, handle, used_latest, namespace, function, params, response_format, tool_name
+        # 5. IO write / export / to_pandas functions
+        if kind == "io":
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _dispatch_io_write,
+                    fn,
+                    edata,
+                    handle,
+                    used_latest,
+                    namespace,
+                    function,
+                    params,
+                    response_format,
+                    tool_name,
+                ),
+                timeout=timeout,
+            )
+    except TimeoutError:
+        return mcp_error(
+            tool_name,
+            f"Execution of '{namespace}.{function}' timed out after {timeout}s.",
+            error_code="TIMEOUT",
+            agent_action="The operation exceeded the server timeout.",
         )
 
     # 6. Mutating edata namespaces (preprocessing & analysis)

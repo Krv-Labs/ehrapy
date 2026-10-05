@@ -15,7 +15,8 @@ from ehrapy.mcp.catalog import (
 )
 from ehrapy.mcp.dispatch import run_dispatch
 from ehrapy.mcp.edata_store import fork_edata, load_edata
-from ehrapy.mcp.errors import mcp_error, unknown_handle_error
+from ehrapy.mcp.errors import mcp_error, policy_error_result, unknown_handle_error
+from ehrapy.mcp.policy import SecurityPolicyError
 from ehrapy.mcp.session import get_session
 from ehrapy.mcp.steering import get_suggested_next
 
@@ -74,6 +75,8 @@ def fork_edata_handle(edata_id: str | None = None, name: str | None = None, ctx:
         return ToolResult(structured_content=struct, content=md)
     except (KeyError, FileNotFoundError):
         return unknown_handle_error("fork_edata_handle", "edata_id", handle)
+    except SecurityPolicyError as exc:
+        return policy_error_result("fork_edata_handle", exc)
     except Exception as exc:  # noqa: BLE001
         return mcp_error("fork_edata_handle", f"Failed to fork handle '{handle}': {exc}", error_code="FORK_ERROR")
 

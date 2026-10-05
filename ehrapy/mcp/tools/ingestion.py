@@ -10,8 +10,8 @@ from fastmcp import Context  # noqa: TC002
 from fastmcp.tools.tool import ToolResult
 
 from ehrapy.mcp.edata_store import load_edata, save_edata
-from ehrapy.mcp.errors import mcp_error, path_access_error, unknown_handle_error
-from ehrapy.mcp.policy import PathNotAllowedError, ReadOnlyModeError, check_path_allowed
+from ehrapy.mcp.errors import mcp_error, path_access_error, policy_error_result, unknown_handle_error
+from ehrapy.mcp.policy import PathNotAllowedError, ReadOnlyModeError, SecurityPolicyError, check_path_allowed
 from ehrapy.mcp.session import get_session
 from ehrapy.mcp.steering import get_suggested_next
 
@@ -26,6 +26,11 @@ def ingest_dataset(
     """Read an external tabular data file (CSV, TSV) and convert it into a managed EHRData handle.
 
     Use this to load clinical cohorts from the host filesystem into the session cache.
+
+    Cache-Bridge pattern for sandboxed clients: If running in a sandboxed agent environment,
+    file paths in the client sandbox are not directly visible to the MCP host. Call
+    get_runtime_context() to inspect cache_dir, copy your data file into cache_dir, and
+    pass that path to file_path.
     """
     try:
         resolved_path = check_path_allowed(file_path, for_write=False)
@@ -73,6 +78,8 @@ def ingest_dataset(
                 md_lines.append(f"- `{s['call']}` — {s['reason']}")
 
         return ToolResult(structured_content=struct, content="\n".join(md_lines))
+    except SecurityPolicyError as exc:
+        return policy_error_result("ingest_dataset", exc)
     except Exception as exc:  # noqa: BLE001
         return mcp_error("ingest_dataset", f"Failed to ingest file '{file_path}': {exc}", error_code="INGEST_ERROR")
 
