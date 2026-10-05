@@ -52,7 +52,7 @@ def get_allowed_roots() -> list[Path] | None:
     if not val:
         return None
     roots: list[Path] = []
-    for part in val.split(":"):
+    for part in val.split(os.pathsep):
         part = part.strip()
         if part:
             roots.append(Path(part).expanduser().resolve())
