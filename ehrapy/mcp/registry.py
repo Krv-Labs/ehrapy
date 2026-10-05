@@ -13,6 +13,8 @@ from pathlib import Path
 
 import platformdirs
 
+from ehrapy.mcp.policy import CacheDirUnavailableError, is_confinement_locked
+
 
 def _probe_writable(path: Path) -> bool:
     """Return True if path can be created and written to."""
@@ -27,13 +29,21 @@ def _probe_writable(path: Path) -> bool:
 
 
 def _get_default_cache_dir() -> Path:
-    env_dir = os.environ.get("EHRAPY_MCP_CACHE_DIR")
+    """Resolve the cache directory.
+
+    While confinement is locked the pinned path is returned whether or not it is
+    currently usable. Moving somewhere else would defeat the confinement that
+    asked for this directory; whether an unusable boundary is fatal is decided
+    by `require_usable` at startup and again on each write, not silently here.
+    """
+    locked = is_confinement_locked()
+    env_dir = os.environ.get("EHRAPY_MCP_CACHE_DIR", "").strip()
     if env_dir:
         cand = Path(env_dir).expanduser().resolve()
-        if _probe_writable(cand):
+        if locked or _probe_writable(cand):
             return cand
     user_cache = Path(platformdirs.user_cache_dir("ehrapy-mcp")).resolve()
-    if _probe_writable(user_cache):
+    if locked or _probe_writable(user_cache):
         return user_cache
     temp_cache = Path(tempfile.gettempdir()) / "ehrapy-mcp"
     if _probe_writable(temp_cache):
@@ -42,14 +52,23 @@ def _get_default_cache_dir() -> Path:
 
 
 def _get_default_demo_data_dir(cache_dir: Path) -> Path:
-    for env_var in ("EHRAPY_MCP_DEMO_DATA_DIR", "EHRAPY_DEMO_DATA_DIR", "EHRAPY_DATA_DIR"):
-        val = os.environ.get(env_var)
-        if val:
-            cand = Path(val).expanduser().resolve()
-            if _probe_writable(cand):
-                return cand
+    """Resolve where downloaded demo cohorts are written.
+
+    While confinement is locked this is always ``<cache_dir>/demo_data``, so demo
+    copies sit inside the directory the supervisor erases. Environment overrides
+    are ignored in that state: a demo cohort is patient-shaped data, and an
+    EHRAPY_DEMO_DATA_DIR or EHRAPY_DATA_DIR inherited from an unrelated parent
+    process would place it outside the boundary without anyone asking for that.
+    """
+    if not is_confinement_locked():
+        for env_var in ("EHRAPY_MCP_DEMO_DATA_DIR", "EHRAPY_DEMO_DATA_DIR", "EHRAPY_DATA_DIR"):
+            val = os.environ.get(env_var)
+            if val:
+                cand = Path(val).expanduser().resolve()
+                if _probe_writable(cand):
+                    return cand
     cand = cache_dir / "demo_data"
-    if _probe_writable(cand):
+    if is_confinement_locked() or _probe_writable(cand):
         return cand
     temp_demo = Path(tempfile.gettempdir()) / "ehrapy_data"
     if _probe_writable(temp_demo):
@@ -116,9 +135,21 @@ class MCPRegistry:
         return self._cache_dir_path / ".registry.lock"
 
     def _ensure_cache_dir(self) -> None:
-        if not _probe_writable(self._cache_dir_path):
+        # Re-resolving here would silently move the cache, which is exactly what
+        # confinement forbids: the directory can disappear mid-session (an erase,
+        # a remounted volume) and the pinned path is still where the data belongs.
+        if not is_confinement_locked() and not _probe_writable(self._cache_dir_path):
             self._cache_dir_path = _get_default_cache_dir()
-        self._cache_dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not is_confinement_locked():
+            self._cache_dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            # Never raise from here: this runs at import, and a pinned-but-unusable
+            # cache must not stop `import ehrapy.mcp` for callers that never touch
+            # the cache. Startup (server.main) and each write report it instead.
+            try:
+                self._cache_dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError:
+                pass
         try:
             self._cache_dir_path.chmod(0o700)
         except OSError:
@@ -147,9 +178,27 @@ class MCPRegistry:
         """Return True if cache and demo directories are confirmed writable."""
         return _probe_writable(self._cache_dir_path) and _probe_writable(self._demo_data_dir_path)
 
+    def require_usable(self) -> Path:
+        """Return the cache directory, or refuse if confinement is locked and it is unusable.
+
+        The write-time counterpart to the startup check in `server.main`. Raises
+        rather than relocating, so the caller reports CACHE_DIR_UNAVAILABLE and
+        no data lands outside the pinned directory.
+        """
+        if is_confinement_locked() and not _probe_writable(self._cache_dir_path):
+            raise CacheDirUnavailableError(self._cache_dir_path)
+        return self._cache_dir_path
+
     def ensure_demo_data_dir(self) -> Path:
-        """Ensure demo data directory is configured and writable, falling back if needed."""
+        """Point the demo loaders at a writable demo directory.
+
+        Falls back only when confinement is not locked; otherwise the pinned
+        location stands and an unusable one raises, since a downloaded cohort is
+        patient-shaped data that must not be redirected out of the boundary.
+        """
         if not _probe_writable(self._demo_data_dir_path):
+            if is_confinement_locked():
+                raise CacheDirUnavailableError(self._demo_data_dir_path)
             self._demo_data_dir_path = _get_default_demo_data_dir(self._cache_dir_path)
         self._configure_ehrapy_demo_paths()
         return self._demo_data_dir_path

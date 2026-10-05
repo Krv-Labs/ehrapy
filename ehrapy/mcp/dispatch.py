@@ -26,7 +26,7 @@ from ehrapy.mcp.errors import (
     path_access_error,
     unknown_handle_error,
 )
-from ehrapy.mcp.policy import SecurityPolicyError, check_path_allowed
+from ehrapy.mcp.policy import SecurityPolicyError, check_path_allowed, is_confinement_locked
 from ehrapy.mcp.registry import registry
 from ehrapy.mcp.serialization import serialize_result
 from ehrapy.mcp.session import get_session
@@ -272,21 +272,40 @@ def _maybe_cache_fitter(handle: str, function: str, res: Any) -> None:
 
 
 def get_tool_timeout() -> float:
-    """Return tool execution timeout in seconds (default: 120.0s)."""
+    """Return tool execution timeout in seconds.
+
+    Defaults to 270s, deliberately under Renyi's 300s per-call ceiling so a slow
+    tool fails with ehrapy's own structured TIMEOUT error rather than having its
+    child process killed underneath it, while still leaving room for the large
+    survival fits a real cohort produces. Renyi strips
+    EHRAPY_MCP_TIMEOUT_SECONDS from servers.toml, so this default is what a
+    Renyi-managed server actually gets.
+
+    This bounds the wait, not the work: the call runs in a worker thread that
+    asyncio cannot cancel, so a timed-out tool keeps running in the background.
+    A caller that retries should expect the abandoned run to still be mutating
+    the handle.
+    """
     env_val = os.environ.get("EHRAPY_MCP_TIMEOUT_SECONDS", "").strip()
     if env_val:
         try:
             return max(0.01, float(env_val))
         except ValueError:
             pass
-    return 120.0
+    return 270.0
 
 
 def _load_demo_sync(fn: Callable[..., Any], params: dict[str, Any]) -> Any:
+    # Raises CACHE_DIR_UNAVAILABLE when locked and the demo directory is gone.
     registry.ensure_demo_data_dir()
     try:
         return fn(**params)
     except OSError:
+        if is_confinement_locked():
+            # A scratch directory here would hold a downloaded cohort outside the
+            # pinned cache, where the supervisor's erase never reaches it.
+            raise
+
         import tempfile
 
         import ehrdata.core.constants as ed_const
@@ -348,6 +367,8 @@ async def _dispatch_demo(
             error_code="TIMEOUT",
             agent_action="Check network connection or load a local dataset via ingest_dataset.",
         )
+    except SecurityPolicyError as exc:
+        return _policy_error(tool_name, exc)
     except Exception as exc:  # noqa: BLE001
         return mcp_error(
             tool_name,

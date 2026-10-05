@@ -87,6 +87,10 @@ def save_edata(
     parent_id: str | None = None,
 ) -> DatasetRecord:
     """Persist EHRData to the MCP cache and register a handle."""
+    # Single choke point for every cache write (ingest, demo, dispatch, export).
+    # Raises CACHE_DIR_UNAVAILABLE when confinement is locked and the cache is
+    # gone, instead of letting the failure surface as a bare OSError from mkdir.
+    registry.require_usable()
     edata_id = edata_id or str(uuid.uuid4())
     path = _cache_path(edata_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
