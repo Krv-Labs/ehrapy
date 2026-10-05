@@ -288,17 +288,39 @@ class MCPRegistry:
 
     @contextmanager
     def _locked_registry(self):
+        """Serialize registry access, best-effort across processes.
+
+        The inter-process lock is best-effort for a documented reason: on a
+        read-only filesystem the lock file cannot even be opened, and that
+        must not block operations the OS still permits. Only lock setup is
+        tolerant -- an ``OSError`` raised by the body propagates untouched,
+        never swallowed and never reported as a second ``yield``.
+        """
         with self._process_lock:
             self._ensure_cache_dir()
+            handle = None
+            acquired = False
             try:
-                with self._lock_path.open("a+", encoding="utf-8") as handle:
-                    self._acquire_file_lock(handle)
-                    try:
-                        yield
-                    finally:
-                        self._release_file_lock(handle)
+                handle = self._lock_path.open("a+", encoding="utf-8")
+                self._acquire_file_lock(handle)
+                acquired = True
             except OSError:
+                # The lock file cannot be opened or locked: proceed without
+                # the inter-process lock rather than failing every write.
+                if handle is not None:
+                    handle.close()
+
+            if not acquired:
                 yield
+                return
+
+            try:
+                yield
+            finally:
+                try:
+                    self._release_file_lock(handle)
+                finally:
+                    handle.close()
 
     @staticmethod
     def _acquire_file_lock(handle) -> None:
