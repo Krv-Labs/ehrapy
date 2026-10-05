@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import TYPE_CHECKING, Any
 
 import mcp.types as mt
@@ -10,12 +11,13 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 from ehrapy.mcp.errors import unknown_argument_error
+from ehrapy.mcp.policy import is_confinement_locked
 from ehrapy.mcp.prompts import SERVER_INSTRUCTIONS
-from ehrapy.mcp.registry import registry
+from ehrapy.mcp.registry import _contain_tempdir, registry
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
 
 if TYPE_CHECKING:
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
 
     pass
 
@@ -43,7 +45,7 @@ _ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
 
 def _append_note(result: ToolResult, note: str, folded: list[str]) -> ToolResult:
     """Append a steering note to a tool result on both channels."""
-    from fastmcp.tools.tool import ToolResult as _ToolResult
+    from fastmcp.tools import ToolResult as _ToolResult
 
     try:
         blocks = list(result.content or [])
@@ -200,6 +202,47 @@ def main() -> None:
     parser.add_argument("--transport", default="stdio", choices=["stdio", "sse", "http"], help="MCP transport protocol")
     parser.add_argument("--no-purge", action="store_true", help="Do not purge cache on startup")
     args = parser.parse_args()
+
+    # Fail closed at startup. When confinement is locked, an unusable cache
+    # directory means the server cannot keep data inside the boundary its
+    # supervisor pinned, and running anyway would be worse than not starting:
+    # exiting non-zero leaves the supervisor with a clearly broken server rather
+    # than a live one quietly relocating patient-derived data. Renyi reads a
+    # failed start as "ehrapy is not available" and leaves it switched off.
+    if is_confinement_locked() and not registry.is_cache_writable():
+        cache_dir = registry.cache_dir()
+        print(
+            f"ehrapy-mcp: refusing to start. Confinement is configured, but the cache directory "
+            f"{cache_dir} is not writable.\n"
+            f"Restore write access to that directory, or unset EHRAPY_MCP_CACHE_DIR and "
+            f"EHRAPY_MCP_ALLOWED_ROOTS to fall back to the default user cache. "
+            f"Refusing to fall back while confinement is locked, because data written outside the "
+            f"pinned directory would not be covered by the confinement that erases it.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    # After the gate above, so a server that refuses to start mutates nothing.
+    # Third-party tempfile users we do not control (ehrdata unpacks compressed
+    # demo archives with tempfile.mkdtemp(), plus pooch, matplotlib and the stdlib)
+    # would otherwise write to the system temp directory on their success path,
+    # outside the pinned boundary, with no error for ehrapy's guards to catch.
+    # This pins the whole process temp directory inside the cache instead; see
+    # `_contain_tempdir` for why the pinned cache wins over an inherited TMPDIR.
+    try:
+        _contain_tempdir(registry.cache_dir())
+    except OSError as exc:
+        # Fail closed, same shape as the gate above: running with an uncontained
+        # temp directory would quietly reopen the hole this is meant to close.
+        print(
+            f"ehrapy-mcp: refusing to start. Confinement is configured, but the temp directory "
+            f"inside {registry.cache_dir()} could not be created ({exc}).\n"
+            f"Remove whatever blocks that path, or unset EHRAPY_MCP_CACHE_DIR and "
+            f"EHRAPY_MCP_ALLOWED_ROOTS to fall back to the default temp directory.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
     if not args.no_purge:
         try:
             registry.purge()
