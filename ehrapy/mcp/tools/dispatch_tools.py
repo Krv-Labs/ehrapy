@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastmcp import Context  # noqa: TC002
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ehrapy.mcp.catalog import (
     function_help,
