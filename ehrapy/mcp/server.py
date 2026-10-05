@@ -17,7 +17,7 @@ from ehrapy.mcp.registry import _contain_tempdir, registry
 from ehrapy.mcp.tools import ALL_TOOLS_LIST
 
 if TYPE_CHECKING:
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
 
     pass
 
@@ -45,7 +45,7 @@ _ORCHESTRATION_KEYS = frozenset({"wait_for_previous"})
 
 def _append_note(result: ToolResult, note: str, folded: list[str]) -> ToolResult:
     """Append a steering note to a tool result on both channels."""
-    from fastmcp.tools.tool import ToolResult as _ToolResult
+    from fastmcp.tools import ToolResult as _ToolResult
 
     try:
         blocks = list(result.content or [])

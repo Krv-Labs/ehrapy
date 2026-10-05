@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from fastmcp import Context  # noqa: TC002
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 
 from ehrapy.mcp.catalog import get_callable, get_namespace_kind

@@ -77,7 +77,7 @@ dask = [
 ]
 leiden = ["igraph"]  # careful - GPL
 mcp = [
-    "fastmcp>=3.4,<4",
+    "fastmcp>=4.0.11,<5",
     "numpydoc",
     "platformdirs",
     "igraph",  # careful - GPL; needed because the MCP workflow guide steers agents to leiden
