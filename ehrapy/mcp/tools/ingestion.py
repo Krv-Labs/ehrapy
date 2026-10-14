@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import ehrdata.io as ed_io
 from fastmcp import Context  # noqa: TC002
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ehrapy.mcp.edata_store import load_edata, save_edata
 from ehrapy.mcp.errors import mcp_error, path_access_error, policy_error_result, unknown_handle_error

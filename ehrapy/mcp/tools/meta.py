@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from fastmcp import Context  # noqa: TC002
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 import ehrapy as ep
 from ehrapy.mcp.policy import get_allowed_roots, is_read_only_mode

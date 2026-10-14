@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
+
 _SESSIONS_LOCK = threading.RLock()
 
 
@@ -38,22 +40,56 @@ class _EHRapySession:
 _SESSIONS: dict[str, _EHRapySession] = {}
 
 
+def _probe(ctx: Any, attr: str) -> Any:
+    """Read an attribute defensively: FastMCP raises outside an active request."""
+    try:
+        return getattr(ctx, attr, None)
+    except (RuntimeError, AttributeError):
+        return None
+
+
 def _session_key(ctx: Any) -> str:
     """Derive a stable per-client key from a FastMCP Context.
 
-    Each attribute is probed defensively: FastMCP raises when these are touched
-    outside an active request context, and a server-wide fallback to "default" is
-    preferable to propagating that error into every tool call.
+    Not every attribute a Context exposes is an identity, and one of them used to
+    be mistaken for one.
+
+    ``client_id`` is the only cross-era-stable identity FastMCP offers: it is
+    whatever the client puts in ``_meta.client_id``, and it reads the same on both
+    protocol eras. A supervisor may send it, so it is consulted first.
+
+    ``session_id`` is **not** a per-client key on the modern ``2026-07-28``
+    protocol. MCP SDK v2 constructs a fresh ``Connection`` for every request on
+    that era (``mcp/server/runner.py``), so FastMCP finds no cached value, mints a
+    new ``uuid4``, and throws it away with the connection
+    (``fastmcp/server/context.py``). Its own docstring only promises "a generated
+    ID for other transports". It is trustworthy only where it is a real
+    negotiated identity: a stateful HTTP transport speaking a handshake-era
+    protocol version, where it is the client's ``mcp-session-id``. Everywhere else
+    it changes on every call, which silently loses the active dataset handle.
+
+    stdio serves exactly one client per process -- one stdin/stdout pair, one
+    connection -- so a process-global key is correct there by construction, on
+    either era. The in-process transport used by the test suite is treated the
+    same way, because it is single-tenant too.
+
+    Each attribute is probed defensively, and a server-wide fallback is
+    preferable to propagating an error into every tool call.
     """
     if ctx is None:
         return "default"
-    for attr in ("client_id", "session_id", "request_id"):
-        try:
-            value = getattr(ctx, attr, None)
-        except (RuntimeError, AttributeError):
-            continue
-        if value:
-            return str(value)
+
+    client_id = _probe(ctx, "client_id")
+    if client_id:
+        return f"client:{client_id}"
+
+    transport = _probe(ctx, "transport")
+    protocol = _probe(_probe(ctx, "request_context"), "protocol_version")
+    if transport not in ("stdio", None) and protocol in HANDSHAKE_PROTOCOL_VERSIONS:
+        session_id = _probe(ctx, "session_id")
+        if session_id:
+            return f"session:{session_id}"
+
     return "default"
 
 
